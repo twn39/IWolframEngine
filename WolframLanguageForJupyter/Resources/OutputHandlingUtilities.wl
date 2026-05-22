@@ -292,6 +292,10 @@ If[
 			{svgStr},
 			svgStr = Quiet[ExportString[expr, "SVG"]];
 			If[StringQ[svgStr] && StringLength[svgStr] > 0,
+				(* Strip XML declaration if present to ensure proper inline SVG rendering in notebooks *)
+				If[StringStartsQ[svgStr, "<?xml"],
+					svgStr = StringReplace[svgStr, StartOfString ~~ "<?xml" ~~ Shortest[___] ~~ "?>" ~~ (Whitespace | "") -> ""]
+				];
 				svgStr,
 				$Failed
 			]
@@ -317,7 +321,10 @@ If[
 				(* the rasterization of result *)
 				imageData,
 				(* the rasterization of result in base 64 *)
-				imageDataInBase64
+				imageInBase64,
+				(* PNG image dimensions for size styling *)
+				pngWidth, pngHeight,
+				widthAttr = "", heightAttr = ""
 			},
 
 			(* rasterize the result *)
@@ -329,6 +336,17 @@ If[
 				!FailureQ[imageData],
 				(* if the rasterization did not fail, convert it to base 64 *)
 				imageInBase64 = BaseEncode[imageData];
+				Block[
+					{parsedImg},
+					parsedImg = Quiet[ImportByteArray[imageData, "PNG"]];
+					If[Head[parsedImg] === Image,
+						{pngWidth, pngHeight} = ImageDimensions[parsedImg];
+						If[pngWidth > 0 && pngHeight > 0,
+							widthAttr = StringJoin[" width=\"", ToString[Ceiling[pngWidth / 2]], "\""];
+							heightAttr = StringJoin[" height=\"", ToString[Ceiling[pngHeight / 2]], "\""];
+						];
+					];
+				];
 				,
 				(* if the rasterization did fail, try to rasterize result with Shallow *)
 				imageData =
@@ -339,6 +357,17 @@ If[
 					!FailureQ[imageData],
 					(* if the rasterization did not fail, convert it to base 64 *)
 					imageInBase64 = BaseEncode[imageData];
+					Block[
+						{parsedImg},
+						parsedImg = Quiet[ImportByteArray[imageData, "PNG"]];
+						If[Head[parsedImg] === Image,
+							{pngWidth, pngHeight} = ImageDimensions[parsedImg];
+							If[pngWidth > 0 && pngHeight > 0,
+								widthAttr = StringJoin[" width=\"", ToString[Ceiling[pngWidth / 2]], "\""];
+								heightAttr = StringJoin[" height=\"", ToString[Ceiling[pngHeight / 2]], "\""];
+							];
+						];
+					];
 					,
 					(* if the rasterization did fail, try to rasterize $Failed *)
 					imageData =
@@ -349,6 +378,17 @@ If[
 						!FailureQ[imageData],
 						(* if the rasterization did not fail, convert it to base 64 *)
 						imageInBase64 = BaseEncode[imageData];
+						Block[
+							{parsedImg},
+							parsedImg = Quiet[ImportByteArray[imageData, "PNG"]];
+							If[Head[parsedImg] === Image,
+								{pngWidth, pngHeight} = ImageDimensions[parsedImg];
+								If[pngWidth > 0 && pngHeight > 0,
+									widthAttr = StringJoin[" width=\"", ToString[Ceiling[pngWidth / 2]], "\""];
+									heightAttr = StringJoin[" height=\"", ToString[Ceiling[pngHeight / 2]], "\""];
+								];
+							];
+						];
 						,
 						(* if the rasterization did fail, use a hard-coded base64 rasterization of $Failed *)
 						imageInBase64 = failedInBase64;
@@ -363,8 +403,24 @@ If[
 					"<img alt=\"Output\" src=\"data:image/png;base64,",
 					(* the rasterized form of the result, converted to base64 *)
 					imageInBase64,
-					(* end the element *)
-					"\">"
+					(* end the element with width and height attributes *)
+					"\"", widthAttr, heightAttr, ">"
+				]
+			]
+		];
+
+	(* generate HTML representation for any expression (including text and graphics) *)
+	toHTML[expr_] :=
+		If[
+			textQ[expr],
+			toOutTextHTML[expr],
+			Module[
+				{svgStr},
+				svgStr = toSVGString[$trueFormatType[expr]];
+				If[
+					StringQ[svgStr],
+					svgStr,
+					toOutImageHTML[expr]
 				]
 			]
 		];
@@ -458,15 +514,6 @@ If[
 					];
 				];
 				AssociateTo[mimeData, "image/png" -> pngBase64];
-				AssociateTo[mimeData, "text/html" ->
-					StringJoin[
-						"<div>",
-						"<img alt=\"Output\" src=\"data:image/png;base64,",
-						pngBase64,
-						"\">",
-						"</div>"
-					]
-				];
 				(* Provide width/height in metadata at logical resolution *)
 				If[pngWidth > 0 && pngHeight > 0,
 					AssociateTo[mimeMeta, "image/png" ->
@@ -479,13 +526,6 @@ If[
 			,
 				(* All rasterization attempts failed: use hard-coded $Failed image *)
 				AssociateTo[mimeData, "image/png"  -> failedInBase64];
-				AssociateTo[mimeData, "text/html"  ->
-					StringJoin[
-						"<img alt=\"Output\" src=\"data:image/png;base64,",
-						failedInBase64,
-						"\">"
-					]
-				];
 			];
 
 			Return[Association["data" -> mimeData, "metadata" -> mimeMeta]];

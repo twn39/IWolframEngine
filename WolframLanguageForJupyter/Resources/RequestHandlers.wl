@@ -309,20 +309,26 @@ If[
 									If[
 										Length[mimeBundles] == 1,
 										(* Single result: emit the full rich MIME bundle as-is *)
-										Append[
-											mimeBundles[[1]]["data"],
-											(* Prepend any error messages into text/html *)
-											"text/html" ->
-												StringJoin[
-													errorMessage,
-													Lookup[mimeBundles[[1]]["data"], "text/html", ""]
-												]
+										If[
+											TrueQ[unreportedErrorMessages],
+											(* Prepend any error messages and ensure graphic HTML is included if text/html was absent *)
+											Append[
+												mimeBundles[[1]]["data"],
+												"text/html" ->
+													StringJoin[
+														errorMessage,
+														If[
+															KeyExistsQ[mimeBundles[[1]]["data"], "text/html"],
+															Lookup[mimeBundles[[1]]["data"], "text/html"],
+															toHTML[First[totalResult["EvaluationResult"]]]
+														]
+													]
+											],
+											(* No error messages: just emit the bundle data as-is (e.g. graphics won't have text/html) *)
+											mimeBundles[[1]]["data"]
 										],
 										(* Multiple results: merge HTMLs into a grid; combine plain texts *)
-										htmlParts = Map[
-											Lookup[#["data"], "text/html", ""] &,
-											mimeBundles
-										];
+										htmlParts = Map[toHTML, totalResult["EvaluationResult"]];
 										plainParts = Map[
 											Lookup[#["data"], "text/plain", ""] &,
 											mimeBundles
