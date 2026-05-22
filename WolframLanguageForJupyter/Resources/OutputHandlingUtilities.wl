@@ -297,6 +297,19 @@ If[
 			]
 		];
 
+	(* determine if an expression is a Wolfram graphics object that should be rendered visually *)
+	(* This check is INDEPENDENT of $canUseFrontEnd, because Rasterize and ExportString[..., "SVG"]
+	   work correctly in headless Wolfram Engine without a frontend. *)
+	graphicsQ[expr_] :=
+		MemberQ[
+			{
+				Graphics, Graphics3D, Graph, Image, GeoGraphics,
+				GeometricScene, ContourGraphics, DensityGraphics,
+				SurfaceGraphics, GraphicsArray, GraphicsGrid, GraphicsRow, GraphicsColumn
+			},
+			Head[expr]
+		];
+
 	(* generate HTML for the rasterized form of a result *)
 	toOutImageHTML[result_] := 
 		Module[
@@ -386,6 +399,14 @@ If[
 			(* always generate a text/plain representation as required by the Jupyter spec *)
 			plainText = toText[expr];
 
+			(* --- Graphics path (CHECKED FIRST, before textQ) ---
+			   graphicsQ uses head-based detection, independent of $canUseFrontEnd.
+			   Rasterize and ExportString[...,"SVG"] work in headless Wolfram Engine. *)
+			If[graphicsQ[expr],
+				(* skip to graphics path directly *)
+				Goto[graphicsPath];
+			];
+
 			(* --- Text path: pure text/symbol expressions --- *)
 			If[textQ[expr],
 				Return[
@@ -399,7 +420,8 @@ If[
 				];
 			];
 
-			(* --- Graphics path: SVG preferred, PNG as fallback --- *)
+			(* --- Graphics/Image path: SVG preferred, PNG as fallback --- *)
+			Label[graphicsPath];
 			mimeData = Association["text/plain" -> plainText];
 			mimeMeta = Association[];
 
