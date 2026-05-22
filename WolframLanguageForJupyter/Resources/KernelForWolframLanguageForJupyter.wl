@@ -63,9 +63,16 @@ loop[] :=
 		},
 		While[
 			True,
+			Block[{waitResult},
+				waitResult = Quiet[SocketWaitNext[{shellSocket, controlSocket}]];
+				If[FailureQ[waitResult],
+					Pause[0.1];
+					Continue[];
+				];
+				readySocket = First[waitResult];
+			];
 			Switch[
-				(* poll sockets until one is ready *)
-				readySocket = First[SocketWaitNext[{shellSocket, controlSocket}]],
+				readySocket,
 				(* if the shell socket or control socket is ready, ... *)
 				shellSocket | controlSocket,
 				(* receive a frame *)

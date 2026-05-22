@@ -356,20 +356,40 @@ If[
 					Hold[
 						Parallel`Developer`Send[hbKernel,
 							Needs["ZeroMQLink`"];
-							Block[{writeFunc, socket, msg},
+							Block[{writeFunc, socket, msg, parentPID = $ParentProcessID},
 								writeFunc = If[TrueQ[$VersionNumber < 12.0],
 									ZeroMQLink`Private`ZMQWriteInternal,
 									ZeroMQLink`ZMQSocketWriteMessage
 								];
-								socket = SocketOpen[placeholderAddr, "ZMQ_REP"];
+								socket = $Failed;
+								Do[
+									socket = SocketOpen[placeholderAddr, "ZMQ_REP"];
+									If[!FailureQ[socket], Break[]];
+									Pause[0.2];
+								,
+									{25}
+								];
 								If[FailureQ[socket],
 									Quit[];
 								];
 								While[True,
-									SocketWaitNext[{socket}];
-									msg = SocketReadMessage[socket];
-									If[FailureQ[msg], Continue[]];
-									writeFunc[socket, msg, "Multipart" -> False];
+									Block[{waitResult, res},
+										res = Quiet[RunProcess[{"ps", "-p", ToString[parentPID]}]];
+										If[AssociationQ[res] && res["ExitCode"] === 1,
+											Quit[];
+										];
+										waitResult = Quiet[TimeConstrained[SocketWaitNext[{socket}], 1.0, $TimedOut]];
+										If[waitResult === $TimedOut,
+											Continue[];
+										];
+										If[FailureQ[waitResult],
+											Pause[0.1];
+											Continue[];
+										];
+										msg = SocketReadMessage[socket];
+										If[FailureQ[msg], Continue[]];
+										writeFunc[socket, msg, "Multipart" -> False];
+									]
 								];
 							]
 						]
