@@ -13,22 +13,8 @@ Symbols defined:
 	$outputSetToTeXForm,
 	$trueFormatType,
 	$truePageWidth,
-	connectionAssoc,
-	bannerWarning,
-	keyString,
-	baseString,
-	heartbeatString,
 	verticalEllipsis,
-	unicodeNamedCharactersReplacements,
-	ioPubString,
-	controlString,
-	inputString,
-	shellString,
-	ioPubSocket,
-	controlSocket,
-	inputSocket,
-	shellSocket,
-	heldLocalSubmit
+	unicodeNamedCharactersReplacements
 *************************************************)
 
 (************************************
@@ -39,13 +25,6 @@ If[
 	!TrueQ[WolframLanguageForJupyter`Private`$GotInitialization],
 	
 	WolframLanguageForJupyter`Private`$GotInitialization = True;
-
-(************************************
-	get required paclets
-*************************************)
-
-	(* obtain ZMQ utilities *)
-	Needs["ZeroMQLink`"]; (* SocketOpen *)
 
 (************************************
 	private symbols
@@ -243,37 +222,7 @@ If[
 		];
 
 	(* hard-coded base64 rasterization of $Failed *)
-	failedInBase64 = "iVBORw0KGgoAAAANSUhEUgAAADcAAAARCAIAAAD2TKM6AAAAhXpUWHRSYXcgcHJvZmlsZSB0eXBlIGV4aWYAAHjaVYvBDcMwDAP/mqIjyLJM2uMYiQNkg45fuu0n9yApgbT1vi97felp2dgxABc5csRU6P6juNciDXn+X9MfZGWgoRhTluEkhnJXkqKFN+LCAahYcIbnIV8gNQN3o86928QyPusLVffpbh/5eCey76LuBgAAAAlwSFlzAAALEwAACxMBAJqcGAAAADx0RVh0U29mdHdhcmUAQ3JlYXRlZCB3aXRoIHRoZSBXb2xmcmFtIExhbmd1YWdlIDogd3d3LndvbGZyYW0uY29tXKKmhQAAACF0RVh0Q3JlYXRpb24gVGltZQAyMDE5OjA3OjAyIDAzOjExOjExSFD8JQAAA8xJREFUSInVlk9IKl8Ux68ajjThLynMwCKLICSDjBbRxpVSFhFkCtFfBMMKAhcu3GXhQopaJBEFISjhsn9YUGE6zSJqkRURFVpKLQqNcYgZHectpszfez9exoP33u+zmnPm3HO/c865w2XRNA3+eth/WkBOfKjEMAzH8T8o5Sd8qJybm1tcXPz1jCaTyeVyMc8URXV3d2s0Go1GEwgEvppqZGQERdEPldfX1yiKIghydnaWCerp6WFn0dbW9mlekiTdbrfX62VMNpvd398/MDAQCATu7u6+qnJ9fT0SiQAA8gAAJycnzc3NnZ2dfD5foVA4nc7W1lYAQDqd1uv1drudWZOXl/dpXi6XG4lEOBwOY7JYLLVaDQDIz8//qsRs2AAAt9vd2NjodrsXFhYuLy9VKlXmNQRB/7wDwzAAIBaLmc1miUTC5/MHBwfPz8+ZSJvNJpVKpVKpTCazWq2fbkySpMViEYvFAoFAp9M9Pz8z/v39/bq6Oj6fr9FoMueEDQBQKpUoihqNxtvb2+Li4kwlAADxePz6nXQ6DQC4uroKBoPz8/MoimIYZjabmciuri6Hw+FwOMRi8ePj46cqLRaLx+NZXV1dW1u7v78fGxsDAESj0fb29qamJp/PV19f//Ly8hZN0zRN016vVy6Xs9nsoaGh19dXxqnT6QAAzFByOJxYLEa/Q5Lk6enp9PQ0BEE4jtNZ9Pb2Go1G+t9UVla6XK6MmUwmIQja3t5mzI2NjYKCApqm7Xa7RCJJpVKMv6yszOPx0DT9dnpUKtXx8fHW1tbm5ubk5GTmi0dHRymKoigqlUoVFhYCAAiCMBqNQqFweHj48PCQIIh4PP5p5b4jHA4TBNHS0sLlcrlcbkdHB0EQOI7f3NzU1tZmN/Oj4wcHBxiGMVpVKlVm1P6TqakpBEEuLi4QBJmdnc1RFovFoigqY4pEIhaL5ff7SZIkSTKVSpEkCcOwQCAIBoM/LmcDACYmJqqrq/v6+rRarcfjYRr9kzJUVVWJRKJEImGz2XJU2dDQsLu7m06nHx4eAAAwDKvVapPJxExwNBpFEAQAoFAoQqHQ0tISSZIrKytM8JvKnZ0dxoVhmM/n02q1mQL8uJ/BYPD7/UKhsKKioqioCIKgXFTq9fq9vT0YhuVyOVPU5eXlkpKS8vLy0tJSqVTK/POVSuX4+LjBYODxeE6ns6am5m19ZqKtVuvMzAydAwRBhEIhiqJyCc5AUVQoFEomk9lOHMfD4fB3qRKJxNPTU7aHRb/fiY6Ojng8nkwmy7GJv5MPlX8z/4+b2zdkknhkRbjZsAAAAABJRU5ErkJggg==";
-
-	(* obtain details on how to connect to Jupyter, from Jupyter's invocation of "KernelForWolframLanguageForJupyter.wl" *)
-	(* NOTE: We remove the extension of the file to be imported so as to avoid accidentally loading the format "MXNet," which has a bad interaction with the paclet SetReplace (https://github.com/maxitg/SetReplace) as of June 22, 2020 *) 
-	Block[
-		{noExtensionFile},
-		noExtensionFile = CopyFile[$CommandLine[[4]], CreateFile[], OverwriteTarget -> True];
-		connectionAssoc = ToString /@ Association[Import[noExtensionFile, "JSON"]];
-		DeleteFile[noExtensionFile];
-	];
-
-	(* warnings to display in kernel information *)
-	bannerWarning = 
-		If[
-			Length[$CommandLine] > 4,
-			"\\n\\nNote: This Jupyter kernel was installed through the WolframScript install method. Accordingly, updates to a WolframLanguageForJupyter paclet will not affect this kernel.",
-			""
-		];
-
-	(* key for generating signatures for reply message frames *)
-	keyString = connectionAssoc["key"];
-
-	(* base string using protocol and IP address from Jupyter *)
-	baseString = StringJoin[connectionAssoc["transport"], "://", connectionAssoc["ip"], ":"];
-
-	(* see https://jupyter-client.readthedocs.io/en/stable/messaging.html for what the following correspond to *)
-	heartbeatString = StringJoin[baseString, connectionAssoc["hb_port"]];
-	ioPubString = StringJoin[baseString, connectionAssoc["iopub_port"]];
-	controlString = StringJoin[baseString, connectionAssoc["control_port"]];
-	inputString = StringJoin[baseString, connectionAssoc["stdin_port"]];
-	shellString = StringJoin[baseString, connectionAssoc["shell_port"]];
+	failedInBase64 = "iVBORw0KGgoAAAANSUhEUgAAADcAAAARCAIAAAD2TKM6AAAAhXpUWHRSYXcgcHJvZmlsZSB0eXBlIGV4aWYAAHjaVYvBDcMwDAP/mqIjyLJM2uMYiQNkg45fuu0n9yApgbT1vi97felp2dgxABc5csRU6P6juNciDXn+X9MfZGWgoRhTluEkhnJXkqKFN+LCAahYcIbnIV8gNQN3o86928QyPusLVffpbh/5eCey76LuBgAAAAlwSFlzAAALEwAACxMBAJqcGAAAADx0RVh0Q3JlYXRlZCB3aXRoIHRoZSBXb2xmcmFtIExhbmd1YWdlIDogd3d3LndvbGZyYW0uY29tXKKmhQAAACF0RVh0Q3JlYXRpb24gVGltZQAyMDE5OjA3OjAyIDAzOjExOjExSFD8JQAAA8xJREFUSInVlk9IKl8Ux68ajjThLynMwCKLICSDjBbRxpVSFhFkCtFfBMMKAhcu3GXhQopaJBEFISjhsn9YUGE6zSJqkRURFVpKLQqNcYgZHectpszfez9exoP33u+zmnPm3HO/c865w2XRNA3+eth/WkBOfKjEMAzH8T8o5Sd8qJybm1tcXPz1jCaTyeVyMc8URXV3d2s0Go1GEwgEvppqZGQERdEPldfX1yiKIghydnaWCerp6WFn0dbW9mlekiTdbrfX62VMNpvd398/MDAQCATu7u6+qnJ9fT0SiQAA8gAAJycnzc3NnZ2dfD5foVA4nc7W1lYAQDqd1uv1drudWZOXl/dpXi6XG4lEOBwOY7JYLLVaDQDIz8//qsRs2AAAt9vd2NjodrsXFhYuLy9VKlXmNQRB/7wDwzAAIBaLmc1miUTC5/MHBwfPz8+ZSJvNJpVKpVKpTCazWq2fbkySpMViEYvFAoFAp9M9Pz8z/v39/bq6Oj6fr9FoMueEDQBQKpUoihqNxtvb2+Li4kwlAADxePz6nXQ6DQC4uroKBoPz8/MoimIYZjabmciuri6Hw+FwOMRi8ePj46cqLRaLx+NZXV1dW1u7v78fGxsDAESj0fb29qamJp/PV19f//Ly8hZN0zRN016vVy6Xs9nsoaGh19dXxqnT6QAAzFByOJxYLEa/Q5Lk6enp9PQ0BEE4jtNZ9Pb2Go1G+t9UVla6XK6MmUwmIQja3t5mzI2NjYKCApqm7Xa7RCJJpVKMv6yszOPx0DT9dnpUKtXx8fHW1tbm5ubk5GTmi0dHRymKoigqlUoVFhYCAAiCMBqNQqFweHj48PCQIIh4PP5p5b4jHA4TBNHS0sLlcrlcbkdHB0EQOI7f3NzU1tZmN/Oj4wcHBxiGMVpVKlVm1P6TqakpBEEuLi4QBJmdnc1RFovFoigqY4pEIhaL5ff7SZIkSTKVSpEkCcOwQCAIBoM/LmcDACYmJqqrq/v6+rRarcfjYRr9kzJUVVWJRKJEImGz2XJU2dDQsLu7m06nHx4eAAAwDKvVapPJxExwNBpFEAQAoFAoQqHQ0tISSZIrKytM8JvKnZ0dxoVhmM/n02q1mQL8uJ/BYPD7/UKhsKKioqioCIKgXFTq9fq9vT0YhuVyOVPU5eXlkpKS8vLy0tJSqVTK/POVSuX4+LjBYODxeE6ns6am5m19ZqKtVuvMzAydAwRBhEIhiqJyCc5AUVQoFEomk9lOHMfD4fB3qRKJxNPTU7aHRb/fiY6Ojng8nkwmy7GJv5MPlX8z/4+b2zdkknhkRbjZsAAAAABJRU5ErkJggg==";
 
 	Block[
 		{
@@ -290,10 +239,7 @@ If[
 					"WriteFunction" -> 
 						Function[
 							{state, bytes},
-							If[
-								loopState["frameAssoc"] =!= Null,
-								redirectPrint[loopState["frameAssoc"], FromCharacterCode[bytes]];
-							];
+							AppendTo[loopState["capturedStdout"], FromCharacterCode[bytes]];
 							{Length[bytes], {}}
 						]
 				}
@@ -309,126 +255,6 @@ If[
 			If[
 				FailureQ[loopState["WolframLanguageForJupyter-stdout"]],
 				loopState["WolframLanguageForJupyter-stdout"] = False;
-			];
-		];
-	];
-
-(************************************
-	open all the non-heartbeat
-		sockets
-*************************************)
-
-	(* open sockets using the set strings from above *)
-	ioPubSocket = SocketOpen[ioPubString, "ZMQ_PUB"];
-	controlSocket = SocketOpen[controlString, "ZMQ_ROUTER"];
-	inputSocket = SocketOpen[inputString, "ZMQ_ROUTER"];
-	shellSocket = SocketOpen[shellString, "ZMQ_ROUTER"];
-
-	(* check for any problems *)
-	If[FailureQ[ioPubSocket] || FailureQ[controlSocket] || FailureQ[inputSocket] || FailureQ[shellSocket],
-		Quit[];
-	];
-
-(************************************
-	spin off a new kernel
-		that nullifies Jupyter's
-		requirement for looping
-		back arrving "heartbeats"
-*************************************)
-
-	(* start heartbeat thread *)
-	(* see https://jupyter-client.readthedocs.io/en/stable/messaging.html#heartbeat-for-kernels *)
-	Block[{hbKernels, hbKernel, useFallback = False},
-		(* Try to load Parallel Developer tools and launch a subkernel *)
-		Quiet[Needs["Parallel`Developer`"]];
-		hbKernels = Quiet[LaunchKernels[1]];
-		If[FailureQ[hbKernels] || Length[hbKernels] == 0,
-			useFallback = True;,
-			(* Get subkernel and isolate it from user-visible parallel kernel lists *)
-			hbKernel = First[hbKernels];
-			Parallel`Protected`$kernels = Select[Parallel`Protected`$kernels, # =!= hbKernel &];
-		];
-
-		If[Not[useFallback],
-			(* A. Parallel sub-kernel approach (0% idle CPU, fully non-blocking) *)
-			Block[{heldSend},
-				heldSend = Replace[
-					Hold[
-						Parallel`Developer`Send[hbKernel,
-							Needs["ZeroMQLink`"];
-							Block[{writeFunc, socket, msg, parentPID = $ParentProcessID},
-								writeFunc = If[TrueQ[$VersionNumber < 12.0],
-									ZeroMQLink`Private`ZMQWriteInternal,
-									ZeroMQLink`ZMQSocketWriteMessage
-								];
-								socket = $Failed;
-								Do[
-									socket = SocketOpen[placeholderAddr, "ZMQ_REP"];
-									If[!FailureQ[socket], Break[]];
-									Pause[0.2];
-								,
-									{25}
-								];
-								If[FailureQ[socket],
-									Quit[];
-								];
-								While[True,
-									Block[{waitResult, res},
-										res = Quiet[RunProcess[{"ps", "-p", ToString[parentPID]}]];
-										If[AssociationQ[res] && res["ExitCode"] === 1,
-											Quit[];
-										];
-										waitResult = Quiet[TimeConstrained[SocketWaitNext[{socket}], 1.0, $TimedOut]];
-										If[waitResult === $TimedOut,
-											Continue[];
-										];
-										If[FailureQ[waitResult],
-											Pause[0.1];
-											Continue[];
-										];
-										msg = SocketReadMessage[socket];
-										If[FailureQ[msg], Continue[]];
-										writeFunc[socket, msg, "Multipart" -> False];
-									]
-								];
-							]
-						]
-					],
-					placeholderAddr -> heartbeatString,
-					Infinity
-				];
-				WolframLanguageForJupyter`Private`hbKernel = hbKernel;
-				Quiet[ReleaseHold[heldSend]];
-				(* Register cleanup handler on exit to close the subkernel *)
-				$Epilog = ($Epilog; Quiet[Close[WolframLanguageForJupyter`Private`hbKernel]];);
-			];
-			,
-			(* B. Graceful fallback: SessionSubmit scheduled task (runs when main kernel is idle) *)
-			Quiet[
-				Block[{socket, writeFunc},
-					writeFunc = If[TrueQ[$VersionNumber < 12.0],
-						ZeroMQLink`Private`ZMQWriteInternal,
-						ZeroMQLink`ZMQSocketWriteMessage
-					];
-					socket = SocketOpen[heartbeatString, "ZMQ_REP"];
-					If[Not[FailureQ[socket]],
-						SessionSubmit[
-							ScheduledTask[
-								If[TrueQ[SocketReadyQ[socket]],
-									Block[{msg},
-										msg = SocketReadMessage[socket];
-										If[Not[FailureQ[msg]],
-											writeFunc[socket, msg, "Multipart" -> False];
-										];
-									];
-								],
-								0.1
-							]
-						];
-						(* Register cleanup handler on exit to close the socket *)
-						$Epilog = ($Epilog; Quiet[Close[socket]];);
-					];
-				]
 			];
 		];
 	];

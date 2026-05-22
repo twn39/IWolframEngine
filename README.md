@@ -1,120 +1,89 @@
 # IWolframEngine: Wolfram Language Kernel for Jupyter
 
-Jupyter provides a protocol (ZMQ) to connect their notebooks to various programming language engines. This project implements a robust, feature-rich Wolfram Language kernel for Jupyter Notebooks and Jupyter Lab.
+This project implements a robust, feature-rich Wolfram Language kernel for Jupyter Notebooks and Jupyter Lab. 
 
-This repository is a customized version of the Wolfram Language kernel featuring enhanced reliability, auto-completion, and heartbeat support.
+It is built as a hybrid architecture leveraging the official `wolframclient` Python package and `ipykernel`. The Python backend manages ZMQ socket transport, heartbeat, message signing, and lifecycle control, while delegating actual evaluation and rich formatting to a local Wolfram Engine session.
 
 ---
 
-## Key Features & Improvements
+## Key Features
 
-* **Robust Message Parser**: Built on a linear character-scanning state machine. It prevents kernel crashes on unbalanced brackets, nested JSON payloads, or trailing binary buffers.
-* **Smart Tab Autocomplete**: Resolves autocompletions for Wolfram Language built-ins, context-specific symbols (e.g., `Developer``), and short Unicode codes (e.g., `\\[Al` matches `α` and `ℵ`).
-* **Enhanced Heartbeat Thread**: Restored ZMQ heartbeat loop running on an isolated background sub-kernel. It is hidden from user-visible parallel kernels (e.g., `ParallelKernels[]`) to avoid interference, and includes a single-threaded `SessionSubmit` fallback for resource-constrained environments.
-* **Rich MIME Output & Vector SVG Graphics**: Implements native SVG output support for 2D graphics and formulas (cleanly stripped of XML declarations to avoid notebook rendering bugs). Rasterizes high-DPI (144 DPI) PNG fallbacks with proper logical dimensions in metadata to prevent double-sized or blurry images on high-resolution displays, and ensures error messages and output grids are HTML-formatted seamlessly.
+* **Zero-Licensing Heartbeat & Concurrency**: Socket transport and heartbeat are handled natively by `ipykernel` in Python. This saves Wolfram license usage and prevents kernel termination during long-running evaluations.
+* **Jupyter Status Compliance**: Implements robust error reporting compliant with the Jupyter message specification. Syntax errors, aborts, and uncaught throws return `status: error` with detailed trackbacks and correct `ename`/`evalue` fields, while keeping warning outputs (e.g., `1/0`) non-fatal.
+* **Smart Tab Autocomplete**: Supports autocompletions for Wolfram Language built-ins, context-specific symbols (e.g., `Developer``), and short Unicode character names (e.g., `\\[Al` completing to `α`).
+* **Rich MIME Output & High-DPI Vector Graphics**: 
+  - Produces clean, inline SVG graphics.
+  - Automatically rasterizes 144 DPI PNG fallback output with proper logical dimensions inside metadata for crisp rendering on high-resolution Retina displays.
+  - Formats syntax errors and warning streams seamlessly.
 
 ---
 
 ## Prerequisites
 
-To run this kernel, you need the following installed:
-
-* **Jupyter** or **JupyterLab**
-* **Wolfram Engine** (e.g., Wolfram Desktop or Mathematica)
-* **wolframscript** (recommended)
-* **Python** (for running integration tests, managed via `uv`)
+1. **Python**: Python 3.8+ (managed via `uv` or `pip`).
+2. **Wolfram Engine**: Mathematica, Wolfram Desktop, or free Wolfram Engine installed locally.
+3. **wolframscript**: Installed and in your system PATH (for running unit tests).
 
 ---
 
 ## Installation
 
-There are two primary methods to make the Wolfram Language available in Jupyter.
+We use [uv](https://github.com/astral-sh/uv) to manage Python dependencies and the virtual environment.
 
-### Method 1: Command Line Installer (Recommended)
-
-1. Clone the repository:
-   ```bash
-   git clone git@github.com:twn39/IWolframEngine.git
-   cd IWolframEngine
-   ```
-2. Register the kernel spec with Jupyter:
-   - **macOS / Linux**:
-     ```bash
-     ./configure-jupyter.wls add
-     ```
-   - **Windows**:
-     ```powershell
-     .\configure-jupyter.wls add
-     ```
-
-To specify custom binary paths, use:
+### 1. Clone the Repository
 ```bash
-./configure-jupyter.wls help
+git clone git@github.com:twn39/IWolframEngine.git
+cd IWolframEngine
 ```
 
-### Method 2: Paclet Installation
+### 2. Install the Package and Register the Kernelspec
+To install the package in editable mode and register the `wolframlanguage` kernel spec with Jupyter:
 
-1. Build the `.paclet` file locally:
-   ```bash
-   ./configure-jupyter.wls build
-   ```
-2. Install the generated paclet in your Wolfram environment:
-   ```wolfram
-   PacletInstall["WolframLanguageForJupyter-0.9.3.paclet"]
-   ```
-3. Load the package and register the kernel:
-   ```wolfram
-   Needs["WolframLanguageForJupyter`"]
-   ConfigureJupyter["Add"]
-   ```
+```bash
+# Install package in editable mode
+uv pip install -e .
+
+# Register the Jupyter kernelspec (defaults to current user)
+uv run python -m WolframLanguageForJupyter.install
+```
+
+To specify a custom prefix or install system-wide, you can run:
+```bash
+uv run python -m WolframLanguageForJupyter.install --sys-prefix
+```
 
 ---
 
-## Testing Your Installation
+## Customizing the Wolfram Kernel Path
 
-### 1. Verify Kernel Spec
-List registered kernels to check if `wolframlanguage` is found:
+By default, the kernel will search for standard installation paths on macOS, Windows, and Linux. If you want to specify a custom Wolfram Kernel binary path, set the `WOLFRAM_KERNEL_PATH` environment variable:
+
 ```bash
-jupyter kernelspec list
+export WOLFRAM_KERNEL_PATH="/Applications/Wolfram Engine.app/Contents/Resources/Wolfram Player.app/Contents/MacOS/WolframKernel"
 ```
 
-### 2. Run Diagnostic & Unit Tests
-We provide a comprehensive test suite in the `Tests` directory:
+---
 
-- **Message Parser Unit Tests**:
-  ```bash
-  wolframscript -file Tests/test_actual_parser.wls
-  ```
-- **Autocomplete Unit Tests**:
-  ```bash
-  wolframscript -file Tests/test_autocomplete.wls
-  ```
-- **Heartbeat Thread Unit Tests**:
-  ```bash
-  wolframscript -file Tests/test_heartbeat.wls
-  ```
-- **Rich MIME Output Unit Tests**:
+## Running the Tests
+
+We provide tests covering both the Python client integration and Wolfram Language formatting logic.
+
+### 1. Python Integration Tests
+Verifies Jupyter client communication, autocomplete behavior, graphics output metadata, and error handling compliance:
+```bash
+uv run python Tests/test_kernel.py
+```
+
+### 2. Wolfram Language Unit Tests
+Runs individual tests within the Wolfram environment:
+* **Rich MIME Output tests**:
   ```bash
   wolframscript -file Tests/test_rich_output.wls
   ```
-- **Full Client Integration Tests** (requires `jupyter-client` and `ipykernel` python packages):
+* **Autocomplete tests**:
   ```bash
-  uv run --with jupyter-client --with ipykernel python3 Tests/test_kernel.py
+  wolframscript -file Tests/test_autocomplete.wls
   ```
-
----
-
-## Removing the Kernel
-
-### Using Command Line
-```bash
-./configure-jupyter.wls remove
-```
-
-### Using Wolfram Language
-```wolfram
-ConfigureJupyter["Remove"]
-```
 
 ---
 

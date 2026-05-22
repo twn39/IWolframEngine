@@ -44,8 +44,8 @@ EndPackage[];
 Print["Initialization.wl loaded successfully."];
 
 success = False;
-If[Head[WolframLanguageForJupyter`Private`hbKernel] === KernelObject,
-  Print["Subkernel object found and running in the background."];
+If[Head[WolframLanguageForJupyter`Private`hbProcess] === ProcessObject || Head[WolframLanguageForJupyter`Private`hbKernel] === KernelObject,
+  Print["Heartbeat forwarder object found and running in the background."];
   Print["Connecting client socket to heartbeat port ", hbPort, "..."];
   client = SocketConnect["tcp://127.0.0.1:" <> ToString[hbPort], "ZMQ_REQ"];
   If[FailureQ[client],
@@ -70,7 +70,7 @@ If[Head[WolframLanguageForJupyter`Private`hbKernel] === KernelObject,
     Close[client];
   ];
 ,
-  Print["No subkernel object found!"];
+  Print["No heartbeat forwarder object found!"];
 ];
 
 (* Clean up sockets opened by Initialization.wl *)

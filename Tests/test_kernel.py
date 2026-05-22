@@ -7,12 +7,14 @@ import sys
 specs = jupyter_client.kernelspec.KernelSpecManager().get_all_specs()
 wl_kernels = [name for name in specs if name.startswith("wolframlanguage")]
 
-if wl_kernels:
+if "wolframlanguage" in wl_kernels:
+    kernel_name = "wolframlanguage"
+elif wl_kernels:
     kernel_name = wl_kernels[0]
-    print(f"Discovered Wolfram Language kernel: '{kernel_name}'")
 else:
-    kernel_name = "wolframlanguage14.3"
-    print(f"No Wolfram Language kernel auto-discovered. Defaulting to '{kernel_name}'")
+    kernel_name = "wolframlanguage"
+
+print(f"Discovered Wolfram Language kernel: '{kernel_name}'")
 
 print(f"Starting kernel '{kernel_name}'...")
 km, kc = jupyter_client.manager.start_new_kernel(kernel_name=kernel_name)
@@ -142,6 +144,92 @@ try:
         print("Rich MIME output integration test PASSED!")
     else:
         print("WARNING: No execute_result received for graphics — skipping MIME checks")
+
+    def execute_and_collect(kc, code, timeout=10):
+        # Flush iopub
+        while True:
+            try:
+                kc.get_iopub_msg(timeout=0.1)
+            except queue.Empty:
+                break
+        
+        msg_id = kc.execute(code)
+        iopub_msgs = []
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                msg = kc.get_iopub_msg(timeout=0.5)
+                iopub_msgs.append(msg)
+                if msg['msg_type'] == 'status' and msg['content'].get('execution_state') == 'idle':
+                    break
+            except queue.Empty:
+                pass
+        
+        reply = get_reply_for_msg_id(kc, msg_id)
+        return reply, iopub_msgs
+
+    # Test Case 1: Syntax Error
+    print("\n[TEST] Verifying Syntax Error (1+*2)...")
+    reply, iopub_msgs = execute_and_collect(kc, '1+*2')
+    print(f"Reply: {reply['content']}")
+    assert reply['content']['status'] == 'error', f"Expected status 'error', got {reply['content']['status']}"
+    assert reply['content']['ename'] == 'SyntaxError', f"Expected ename 'SyntaxError', got {reply['content']['ename']}"
+    assert "Syntax" in reply['content']['evalue'] or "expression" in reply['content']['evalue'].lower(), f"Expected evalue to describe syntax error, got {reply['content']['evalue']}"
+    assert len(reply['content']['traceback']) > 0, "Expected non-empty traceback"
+    
+    # Check iopub messages for 'error'
+    error_msg = next((m for m in reversed(iopub_msgs) if m['msg_type'] == 'error'), None)
+    assert error_msg is not None, "Missing 'error' message on iopub socket for syntax error"
+    assert error_msg['content']['ename'] == 'SyntaxError'
+    assert error_msg['content']['evalue'] == reply['content']['evalue']
+    # Check that no execute_result was sent
+    assert not any(m['msg_type'] == 'execute_result' for m in iopub_msgs), "Should not send execute_result on error"
+    print("Syntax Error test passed!")
+
+    # Test Case 2: Abort
+    print("\n[TEST] Verifying Abort (Abort[])...")
+    reply, iopub_msgs = execute_and_collect(kc, 'Abort[]')
+    print(f"Reply: {reply['content']}")
+    assert reply['content']['status'] == 'error', f"Expected status 'error', got {reply['content']['status']}"
+    assert reply['content']['ename'] == 'Abort', f"Expected ename 'Abort', got {reply['content']['ename']}"
+    assert "aborted" in reply['content']['evalue'].lower(), f"Expected evalue to describe abort, got {reply['content']['evalue']}"
+    assert len(reply['content']['traceback']) > 0, "Expected non-empty traceback"
+    
+    # Check iopub messages for 'error'
+    error_msg = next((m for m in reversed(iopub_msgs) if m['msg_type'] == 'error'), None)
+    assert error_msg is not None, "Missing 'error' message on iopub socket for abort"
+    assert error_msg['content']['ename'] == 'Abort'
+    assert error_msg['content']['evalue'] == reply['content']['evalue']
+    # Check that no execute_result was sent
+    assert not any(m['msg_type'] == 'execute_result' for m in iopub_msgs), "Should not send execute_result on error"
+    print("Abort test passed!")
+
+    # Test Case 3: Uncaught Throw
+    print("\n[TEST] Verifying Uncaught Throw (Throw[abc])...")
+    reply, iopub_msgs = execute_and_collect(kc, 'Throw[abc]')
+    print(f"Reply: {reply['content']}")
+    assert reply['content']['status'] == 'error', f"Expected status 'error', got {reply['content']['status']}"
+    assert reply['content']['ename'] == 'Throw', f"Expected ename 'Throw', got {reply['content']['ename']}"
+    assert "uncaught" in reply['content']['evalue'].lower() or "throw" in reply['content']['evalue'].lower(), f"Expected evalue to describe uncaught throw, got {reply['content']['evalue']}"
+    assert len(reply['content']['traceback']) > 0, "Expected non-empty traceback"
+    
+    # Check iopub messages for 'error'
+    error_msg = next((m for m in reversed(iopub_msgs) if m['msg_type'] == 'error'), None)
+    assert error_msg is not None, "Missing 'error' message on iopub socket for uncaught throw"
+    assert error_msg['content']['ename'] == 'Throw'
+    assert error_msg['content']['evalue'] == reply['content']['evalue']
+    # Check that no execute_result was sent
+    assert not any(m['msg_type'] == 'execute_result' for m in iopub_msgs), "Should not send execute_result on error"
+    print("Uncaught Throw test passed!")
+
+    # Test Case 4: Normal Warning (1/0)
+    print("\n[TEST] Verifying Normal Warning (1/0)...")
+    reply, iopub_msgs = execute_and_collect(kc, '1/0')
+    print(f"Reply: {reply['content']}")
+    assert reply['content']['status'] == 'ok', f"Expected status 'ok' for warning, got {reply['content']['status']}"
+    # Check that execute_result was sent
+    assert any(m['msg_type'] == 'execute_result' for m in iopub_msgs), "Expected execute_result for 1/0 warning"
+    print("Normal Warning test passed!")
 
     print("\n--- RESULTS ---")
     stdout_str = ''.join(stdout).strip()

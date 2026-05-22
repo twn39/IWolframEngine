@@ -515,6 +515,7 @@ If[
 				If[
 					!parseTracker["SyntaxError"],
 					(* increment $Line *)
+					If[!IntegerQ[$Line], $Line = loopState["executionCount"] + parseTracker["ExpressionsParsed"] - 1];
 					$Line++;
 					(* set InString *)
 					Unprotect[InString];
@@ -603,10 +604,18 @@ If[
 			(* restore $Messages *)
 			$Messages = oldMessages;
 
-			(* obtain generated messages *)
-			generatedMessages = Import[stream[[1]], "String"];
 			(* close the opened stream *)
 			Close[stream];
+
+			(* obtain generated messages *)
+			If[
+				FileExistsQ[stream[[1]]],
+				generatedMessages = Import[stream[[1]], "String"];
+				DeleteFile[stream[[1]]];,
+				
+				generatedMessages = "";
+			];
+			If[!StringQ[generatedMessages], generatedMessages = ""];
 
 			(* add the total number of indices consumed by this evaluation *)
 			AssociateTo[
@@ -621,13 +630,171 @@ If[
 			];
 
 			(* add the result of the evaluation and any generated messages to totalResult *)
-			AssociateTo[totalResult, {"EvaluationResult" -> evaluationResult, "GeneratedMessages" -> generatedMessages}];
+			AssociateTo[totalResult, {
+				"EvaluationResult" -> evaluationResult,
+				"GeneratedMessages" -> generatedMessages,
+				"SyntaxError" -> TrueQ[parseTracker["SyntaxError"]]
+			}];
 
 			(* return totalResult *)
 			Return[totalResult];
 		];
 	(* set simulatedEvaluate to not implicitly evaluate its arguments *)
 	SetAttributes[simulatedEvaluate, HoldAll];
+
+	evaluateAndFormat[codeStr_String] :=
+		Module[
+			{
+				totalResult,
+				isSyntaxError, isAbort, isThrow, isError,
+				ename, evalue, traceback,
+				mimeBundles, singleBundle,
+				capturedStdout, capturedStderr,
+				executionCount
+			},
+
+			(* 1. Initialize buffers *)
+			loopState["capturedStdout"] = {};
+			loopState["capturedStderr"] = {};
+			loopState["LastMessages"] = {};
+
+			(* 2. Set print and message formatters *)
+			loopState["printFunction"] = (AppendTo[loopState["capturedStdout"], #1] &);
+
+			messageFormatter[messageName_, messageText_] :=
+				Module[
+					{msgString},
+					msgString = ToString[System`ColonForm[HoldForm[messageName], messageText]];
+					AppendTo[loopState["LastMessages"], msgString];
+					AppendTo[loopState["capturedStderr"], msgString];
+					msgString
+				];
+			SetAttributes[messageFormatter, HoldAll];
+			Internal`$MessageFormatter = messageFormatter;
+
+			(* 3. Run evaluation *)
+			totalResult = simulatedEvaluate[codeStr];
+
+			(* 4. Cleanup formatters *)
+			loopState["printFunction"] = False;
+			Unset[messageFormatter];
+			Unset[Internal`$MessageFormatter];
+
+			(* 5. Check for execution errors *)
+			isSyntaxError = TrueQ[totalResult["SyntaxError"]];
+			isAbort = MemberQ[totalResult["EvaluationResult"], $Aborted];
+			isThrow = AnyTrue[totalResult["EvaluationResult"], MatchQ[#, Hold[Throw[___]] | Hold[System`Throw[___]]] &];
+			isError = isSyntaxError || isAbort || isThrow;
+
+			executionCount = loopState["executionCount"];
+			loopState["executionCount"] += totalResult["ConsumedIndices"];
+
+			capturedStdout = StringJoin[loopState["capturedStdout"]];
+			capturedStderr = loopState["capturedStderr"];
+
+			If[isError,
+				ename = Which[
+					isSyntaxError, "SyntaxError",
+					isAbort, "Abort",
+					isThrow, "Throw",
+					True, "Error"
+				];
+				evalue = Which[
+					isSyntaxError,
+						Block[{trimmed = StringTrim[totalResult["GeneratedMessages"]]},
+							If[trimmed === "\"\"" || trimmed === "" || StringLength[trimmed] == 0,
+								If[ListQ[loopState["LastMessages"]] && Length[loopState["LastMessages"]] > 0,
+									StringTrim[Last[loopState["LastMessages"]]],
+									"Syntax error in expression."
+								],
+								trimmed
+							]
+						],
+					isAbort, "Evaluation aborted.",
+					isThrow,
+						Block[{trimmed = StringTrim[totalResult["GeneratedMessages"]]},
+							If[trimmed === "\"\"" || trimmed === "" || StringLength[trimmed] == 0,
+								If[ListQ[loopState["LastMessages"]] && Length[loopState["LastMessages"]] > 0,
+									StringTrim[Last[loopState["LastMessages"]]],
+									"Uncaught Throw returned to top level."
+								],
+								trimmed
+							]
+						],
+					True, "Unknown evaluation error."
+				];
+				traceback = {
+					StringJoin["\033[0;31m", ename, ": ", evalue, "\033[0m"]
+				};
+
+				Return[
+					Association[
+						"status" -> "error",
+						"execution_count" -> executionCount,
+						"ename" -> ename,
+						"evalue" -> evalue,
+						"traceback" -> traceback,
+						"captured_stdout" -> capturedStdout,
+						"captured_stderr" -> capturedStderr
+					]
+				];
+			];
+
+			(* 6. Format successful output *)
+			If[Length[totalResult["EvaluationResultOutputLineIndices"]] == 0,
+				Return[
+					Association[
+						"status" -> "ok",
+						"execution_count" -> executionCount,
+						"captured_stdout" -> capturedStdout,
+						"captured_stderr" -> capturedStderr,
+						"mime_bundle" -> Null
+					]
+				];
+			];
+
+			mimeBundles = Map[toMimeBundle, totalResult["EvaluationResult"]];
+
+			singleBundle = If[Length[mimeBundles] == 1,
+				Association[
+					"data" -> mimeBundles[[1]]["data"],
+					"metadata" -> mimeBundles[[1]]["metadata"]
+				],
+				Block[
+					{htmlParts, plainParts, combinedData, combinedMeta},
+					htmlParts = Map[toHTML, totalResult["EvaluationResult"]];
+					plainParts = Map[Lookup[#["data"], "text/plain", ""] &, mimeBundles];
+
+					combinedData = Association[
+						"text/html" -> StringJoin[
+							"<style>\n\t\t.wlj-grid-container {\n\t\t\tdisplay: inline-grid;\n\t\t\tgrid-template-columns: auto;\n\t\t}\n\t</style>\n\t<div>",
+							"<div class=\"wlj-grid-container\">",
+							StringJoin[
+								Table[
+									StringJoin["<div class=\"wlj-grid-item\">", htmlParts[[i]], "</div>"],
+									{i, 1, Length[htmlParts]}
+								]
+							],
+							"</div></div>"
+						],
+						"text/plain" -> StringJoin[Riffle[plainParts, "\n"]]
+					];
+					combinedMeta = Association[];
+
+					Association["data" -> combinedData, "metadata" -> combinedMeta]
+				]
+			];
+
+			Return[
+				Association[
+					"status" -> "ok",
+					"execution_count" -> executionCount,
+					"captured_stdout" -> capturedStdout,
+					"captured_stderr" -> capturedStderr,
+					"mime_bundle" -> singleBundle
+				]
+			];
+		];
 
 	(* end the private context for WolframLanguageForJupyter *)
 	End[]; (* `Private` *)

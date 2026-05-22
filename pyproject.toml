@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "WolframLanguageForJupyter"
+version = "1.0.0"
+description = "A Wolfram Language Jupyter kernel refactored with wolframclient and ipykernel"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "ipykernel>=6.0.0",
+    "wolframclient>=1.1.0",
+]
+
+[tool.setuptools]
+packages = ["WolframLanguageForJupyter"]
+
+[tool.setuptools.package-data]
+WolframLanguageForJupyter = ["Resources/*.wl"]

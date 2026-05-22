@@ -118,7 +118,10 @@ If[
 				totalResult,
 
 				(* flag for if there are any unreported error messages after execution of the input *)
-				unreportedErrorMessages
+				unreportedErrorMessages,
+
+				(* local variables for error handling *)
+				isSyntaxError, isAbort, isThrow, isError, ename, evalue, traceback
 			},
 
 			(* if an is_complete_request has been sent, assume jupyter-console is running the kernel,
@@ -143,16 +146,20 @@ If[
 
 			(* if loopState["redirectMessages"] is True,
 				update Jupyter explicitly with any errors that occur DURING the execution of the input *)
+			loopState["LastMessages"] = {};
 			If[
 				loopState["redirectMessages"],
 				messageFormatter[messageName_, messageText_] :=
-					redirectMessages[
-						loopState["frameAssoc"],
-						messageName,
-						messageText,
-						(* add a newline if loopState["isCompleteRequestSent"] *)
-						loopState["isCompleteRequestSent"]
-					];
+					(
+						AppendTo[loopState["LastMessages"], ToString[System`ColonForm[HoldForm[messageName], messageText]]];
+						redirectMessages[
+							loopState["frameAssoc"],
+							messageName,
+							messageText,
+							(* add a newline if loopState["isCompleteRequestSent"] *)
+							loopState["isCompleteRequestSent"]
+						]
+					);
 				SetAttributes[messageFormatter, HoldAll];
 				Internal`$MessageFormatter = messageFormatter;
 			];
@@ -169,6 +176,69 @@ If[
 
 			(* set the appropriate reply type *)
 			loopState["replyMsgType"] = "execute_reply";
+
+			(* error detection and handling *)
+			isSyntaxError = TrueQ[totalResult["SyntaxError"]];
+			isAbort = MemberQ[totalResult["EvaluationResult"], $Aborted];
+			isThrow = AnyTrue[totalResult["EvaluationResult"], MatchQ[#, Hold[Throw[___]] | Hold[System`Throw[___]]] &];
+			isError = isSyntaxError || isAbort || isThrow;
+			If[
+				isError,
+				ename = Which[
+					isSyntaxError, "SyntaxError",
+					isAbort, "Abort",
+					isThrow, "Throw",
+					True, "Error"
+				];
+				evalue = Which[
+					isSyntaxError,
+						Block[{trimmed = StringTrim[totalResult["GeneratedMessages"]]},
+							If[trimmed === "\"\"" || trimmed === "" || StringLength[trimmed] == 0,
+								If[ListQ[loopState["LastMessages"]] && Length[loopState["LastMessages"]] > 0,
+									StringTrim[Last[loopState["LastMessages"]]],
+									"Syntax error in expression."
+								],
+								trimmed
+							]
+						],
+					isAbort, "Evaluation aborted.",
+					isThrow,
+						Block[{trimmed = StringTrim[totalResult["GeneratedMessages"]]},
+							If[trimmed === "\"\"" || trimmed === "" || StringLength[trimmed] == 0,
+								If[ListQ[loopState["LastMessages"]] && Length[loopState["LastMessages"]] > 0,
+									StringTrim[Last[loopState["LastMessages"]]],
+									"Uncaught Throw returned to top level."
+								],
+								trimmed
+							]
+						],
+					True, "Unknown evaluation error."
+				];
+				traceback = {
+					StringJoin["\033[0;31m", ename, ": ", evalue, "\033[0m"]
+				};
+
+				loopState["replyContent"] = ExportString[
+					Association[
+						"status" -> "error",
+						"execution_count" -> loopState["executionCount"],
+						"ename" -> ename,
+						"evalue" -> evalue,
+						"traceback" -> traceback
+					],
+					"JSON",
+					"Compact" -> True
+				];
+
+				loopState["ioPubReplyFrame"] = createReplyFrame[
+					loopState["frameAssoc"],
+					"error",
+					ExportString[Association["ename" -> ename, "evalue" -> evalue, "traceback" -> traceback], "JSON", "Compact" -> True],
+					False
+				];
+				loopState["executionCount"] += totalResult["ConsumedIndices"];
+				Return[];
+			];
 
 			(* set the content of the reply to information about WolframLanguageForJupyter's execution of the input *)
 			loopState["replyContent"] = 

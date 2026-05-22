@@ -3,3 +3,7 @@ scratch/
 .ipynb_checkpoints/
 Untitled1.ipynb
 dummy_conn.json
+*.egg-info
+.ipynb_checkpoints
+.idea
+.venv

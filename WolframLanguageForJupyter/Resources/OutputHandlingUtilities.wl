@@ -314,6 +314,34 @@ If[
 			Head[expr]
 		];
 
+	(* determine if an expression has a mathematical head for automatic LaTeX rendering *)
+	isMathExprQ[expr_] :=
+		With[{h = Head[expr]},
+			MemberQ[
+				{
+					Plus, Times, Power, Rational, Log, Log10, Log2, Exp, Sin, Cos, Tan, Cot, Sec, Csc,
+					ArcSin, ArcCos, ArcTan, ArcCot, Sinh, Cosh, Tanh, Integrate, System`D, Derivative,
+					MatrixForm, SeriesData, Limit, Sum, Product, Solve, Reduce, Equal, Unequal,
+					Greater, Less, GreaterEqual, LessEqual
+				},
+				h
+			] || (
+				MemberQ[{Hold, HoldForm, Defer, HoldPattern}, h] &&
+				Length[expr] >= 1 &&
+				isMathExprQ[First[expr]]
+			)
+		];
+
+	(* clean up Wolfram-specific LaTeX syntax into web-safe MathJax strings *)
+	sanitizeLaTeX[latexStr_String] :=
+		Module[
+			{cleanStr = StringTrim[latexStr]},
+			cleanStr = StringReplace[cleanStr, {
+				"\\text{d}" -> "\\mathrm{d}"
+			}];
+			cleanStr
+		];
+
 	(* generate HTML for the rasterized form of a result *)
 	toOutImageHTML[result_] := 
 		Module[
@@ -412,8 +440,16 @@ If[
 	(* generate HTML representation for any expression (including text and graphics) *)
 	toHTML[expr_] :=
 		If[
-			textQ[expr],
-			toOutTextHTML[expr],
+			textQ[expr] || isMathExprQ[expr] || Head[expr] === TeXForm || $outputSetToTeXForm,
+			If[((Head[expr] === TeXForm) || ($outputSetToTeXForm) || isMathExprQ[expr]),
+				Module[
+					{latexText},
+					latexText = toText[If[Head[expr] === TeXForm, expr, TeXForm[expr]], Infinity];
+					latexText = sanitizeLaTeX[latexText];
+					StringJoin["<div style=\"text-align: left;\"><style>mjx-container[display=\"true\"] { align-items: flex-start !important; text-align: left !important; } .MathJax_Display { text-align: left !important; }</style>$$", latexText, "$$</div>"]
+				],
+				toOutTextHTML[expr]
+			],
 			Module[
 				{svgStr},
 				svgStr = toSVGString[$trueFormatType[expr]];
@@ -463,16 +499,37 @@ If[
 				Goto[graphicsPath];
 			];
 
-			(* --- Text path: pure text/symbol expressions --- *)
-			If[textQ[expr],
-				Return[
-					Association[
-						"data" -> Association[
-							"text/plain" -> plainText,
-							"text/html"  -> toOutTextHTML[expr]
-						],
-						"metadata" -> Association[]
-					]
+			(* --- Text path: pure text/symbol expressions or LaTeX/Math expressions --- *)
+			If[textQ[expr] || isMathExprQ[expr] || (Head[expr] === TeXForm) || $outputSetToTeXForm,
+				Module[
+					{
+						isTeX,
+						latexText,
+						dataAssoc
+					},
+					isTeX = ((Head[expr] === TeXForm) || ($outputSetToTeXForm) || isMathExprQ[expr]);
+					dataAssoc = Association[
+						"text/plain" -> plainText
+					];
+					
+					If[isTeX,
+						(* Generate the LaTeX representation *)
+						latexText = toText[If[Head[expr] === TeXForm, expr, TeXForm[expr]], Infinity];
+						latexText = sanitizeLaTeX[latexText];
+						AssociateTo[dataAssoc, "text/latex" -> latexText];
+						(* For HTML, wrap it in double dollars to trigger client-side MathJax, aligned left with style overrides *)
+						AssociateTo[dataAssoc, "text/html" -> StringJoin["<div style=\"text-align: left;\"><style>mjx-container[display=\"true\"] { align-items: flex-start !important; text-align: left !important; } .MathJax_Display { text-align: left !important; }</style>$$", latexText, "$$</div>"]];
+					,
+						(* Standard text/html output *)
+						AssociateTo[dataAssoc, "text/html" -> toOutTextHTML[expr]];
+					];
+
+					Return[
+						Association[
+							"data" -> dataAssoc,
+							"metadata" -> Association[]
+						]
+					];
 				];
 			];
 
