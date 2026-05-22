@@ -278,97 +278,89 @@ If[
 						"Compact" -> True
 					];
 				,
-				(* if every output line can be formatted as text, use a function that converts the output to text *)
-				(* otherwise, use a function that converts the output to an image *)
-				(* TODO: allow for mixing text and image results *)
-				If[AllTrue[totalResult["EvaluationResult"], textQ],
-					toOut = toOutTextHTML,
-					toOut = toOutImageHTML
-				];
-				(* prepare the content for a reply message frame to be sent on the IO Publish socket *)
-				ioPubReplyContent = ExportByteArray[
-					Association[
-						(* the first output index *)
-						"execution_count" -> First[totalResult["EvaluationResultOutputLineIndices"]],
-						(* the data representing the results and messages *)
-						"data" ->
-							{
-								(* generate HTML for the results and messages *)
-								"text/html" ->
-									If[
-										loopState["isCompleteRequestSent"],
-										(* if an is_complete_request has been sent, assume jupyter-console is running the kernel,
-											and do not generate HTML *)
-										"",
-										(* otherwise, output the results in a grid *)
-										If[
-											Length[totalResult["EvaluationResult"]] > 1,
-											StringJoin[
-												(* add grid style *)
-												"<style>
-													.grid-container {
-														display: inline-grid;
-														grid-template-columns: auto;
-													}
-												</style>
+				(* Build output using per-result MIME bundles for complete Jupyter protocol compliance.
+				   Each result independently gets: image/svg+xml (when possible), image/png (144 DPI),
+				   text/html (fallback), and text/plain (required by spec).
+				   Replaces the old binary AllTrue[..., textQ] strategy. *)
+				Block[
+					{mimeBundles, singleBundle, htmlParts, plainParts},
 
-												<div>",
-												(* display error message *)
-												errorMessage,
-												(* start the grid *)
-												"<div class=\"grid-container\">",
-												(* display the output lines *)
-												Table[
-													{
-														(* start the grid item *)
-														"<div class=\"grid-item\">",
-														(* show the output line *)
-														toOut[totalResult["EvaluationResult"][[outIndex]]],
-														(* end the grid item *)
-														"</div>"
-													},
-													{outIndex, 1, Length[totalResult["EvaluationResult"]]}
-												],
-												(* end the element *)
-												"</div></div>"
-											],
+					(* Generate a complete MIME bundle for each output line independently *)
+					mimeBundles = Map[toMimeBundle, totalResult["EvaluationResult"]];
+
+					ioPubReplyContent = ExportByteArray[
+						Association[
+							(* the first output index *)
+							"execution_count" -> First[totalResult["EvaluationResultOutputLineIndices"]],
+							"data" ->
+								If[
+									loopState["isCompleteRequestSent"],
+									(* jupyter-console: only text/plain, no HTML *)
+									Association[
+										"text/plain" ->
 											StringJoin[
-												(* start the element *)
-												"<div>",
-												(* display error message *)
-												errorMessage,
-												(* if there are messages, but no results, do not display a result *)
-												If[
-													Length[totalResult["EvaluationResult"]] == 0,
-													"",
-													(* otherwise, display a result *)
-													toOut[First[totalResult["EvaluationResult"]]]
-												],
-												(* end the element *)
-												"</div>"
+												Riffle[
+													Map[Lookup[#["data"], "text/plain", ""] &, mimeBundles],
+													"\n"
+												]
 											]
-										]
 									],
-								(* provide, as a backup, plain text for the results *)
-								"text/plain" ->
-									StringJoin[
-										Table[
-											{
-												toText[totalResult["EvaluationResult"][[outIndex]]],
-												(* -- also, suppress newline if this is the last result *)
-												If[outIndex != Length[totalResult["EvaluationResult"]], "\n", ""]
-											},
-											{outIndex, 1, Length[totalResult["EvaluationResult"]]}
+									(* JupyterLab / Notebook: use full MIME bundle *)
+									If[
+										Length[mimeBundles] == 1,
+										(* Single result: emit the full rich MIME bundle as-is *)
+										Append[
+											mimeBundles[[1]]["data"],
+											(* Prepend any error messages into text/html *)
+											"text/html" ->
+												StringJoin[
+													errorMessage,
+													Lookup[mimeBundles[[1]]["data"], "text/html", ""]
+												]
+										],
+										(* Multiple results: merge HTMLs into a grid; combine plain texts *)
+										htmlParts = Map[
+											Lookup[#["data"], "text/html", ""] &,
+											mimeBundles
+										];
+										plainParts = Map[
+											Lookup[#["data"], "text/plain", ""] &,
+											mimeBundles
+										];
+										Association[
+											"text/html" ->
+												StringJoin[
+													"<style>\n\t\t.wlj-grid-container {\n\t\t\tdisplay: inline-grid;\n\t\t\tgrid-template-columns: auto;\n\t\t}\n\t</style>\n\t<div>",
+													errorMessage,
+													"<div class=\"wlj-grid-container\">",
+													StringJoin[
+														Table[
+															StringJoin["<div class=\"wlj-grid-item\">", htmlParts[[i]], "</div>"],
+															{i, 1, Length[htmlParts]}
+														]
+													],
+													"</div></div>"
+												],
+											"text/plain" ->
+												StringJoin[Riffle[plainParts, "\n"]]
 										]
 									]
-							},
-						(* no metadata *)
-						"metadata" -> {"text/html" -> {}, "text/plain" -> {}}
-					],
-					"JSON",
-					"Compact" -> True
+								],
+							(* metadata: use the first bundle's metadata for single results,
+							   empty for multi-result (metadata is per-MIME-type in that case) *)
+							"metadata" ->
+								If[
+									!loopState["isCompleteRequestSent"] && Length[mimeBundles] == 1,
+									mimeBundles[[1]]["metadata"],
+									Association[]
+								]
+						],
+						"JSON",
+						"Compact" -> True
+					];
 				];
 			];
+
 			
 			(* create frame from ioPubReplyContent *)
 			loopState["ioPubReplyFrame"] = 

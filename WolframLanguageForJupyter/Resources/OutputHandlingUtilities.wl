@@ -256,7 +256,8 @@ If[
 		];
 
 	(* generate a byte array of image data for the rasterized form of a result *)
-	toImageData[result_] :=
+	(* dpi: image resolution; default 144 for HiDPI/Retina screen support (2x logical pixels) *)
+	toImageData[result_, dpi_:144] :=
 		Module[
 			{
 				(* the preprocessed form of a result *)
@@ -267,7 +268,8 @@ If[
 				Head[result] === Manipulate,
 				preprocessedForm = result;
 				,
-				preprocessedForm = Rasterize[result];
+				(* rasterize at specified DPI for crisp output on HiDPI screens *)
+				preprocessedForm = Rasterize[result, ImageResolution -> dpi];
 			];
 			(* if the preprocessing failed, return $Failed *)
 			If[
@@ -281,6 +283,18 @@ If[
 					"PNG"
 				]
 			];
+		];
+
+	(* generate an SVG string for the result; returns $Failed if the export fails *)
+	(* SVG is a lossless vector format, infinitely scalable on any screen *)
+	toSVGString[expr_] :=
+		Module[
+			{svgStr},
+			svgStr = Quiet[ExportString[expr, "SVG"]];
+			If[StringQ[svgStr] && StringLength[svgStr] > 0,
+				svgStr,
+				$Failed
+			]
 		];
 
 	(* generate HTML for the rasterized form of a result *)
@@ -340,6 +354,119 @@ If[
 					"\">"
 				]
 			]
+		];
+
+	(* build a complete Jupyter MIME bundle for a single expression result *)
+	(* Returns an Association with "data" and "metadata" keys following the Jupyter protocol *)
+	(* See https://jupyter-client.readthedocs.io/en/stable/messaging.html#display-data *)
+	toMimeBundle[expr_] :=
+		Module[
+			{
+				(* the processed expression applying format type *)
+				processedExpr,
+
+				(* text/plain fallback - always generated *)
+				plainText,
+
+				(* SVG export result *)
+				svgStr,
+
+				(* PNG byte array and base64 *)
+				pngData, pngBase64,
+
+				(* PNG image dimensions for metadata *)
+				pngWidth, pngHeight,
+
+				(* accumulated MIME data and metadata dicts *)
+				mimeData, mimeMeta
+			},
+
+			processedExpr = $trueFormatType[expr];
+
+			(* always generate a text/plain representation as required by the Jupyter spec *)
+			plainText = toText[expr];
+
+			(* --- Text path: pure text/symbol expressions --- *)
+			If[textQ[expr],
+				Return[
+					Association[
+						"data" -> Association[
+							"text/plain" -> plainText,
+							"text/html"  -> toOutTextHTML[expr]
+						],
+						"metadata" -> Association[]
+					]
+				];
+			];
+
+			(* --- Graphics path: SVG preferred, PNG as fallback --- *)
+			mimeData = Association["text/plain" -> plainText];
+			mimeMeta = Association[];
+
+			(* Attempt SVG export (lossless vector; works for most 2D Wolfram graphics) *)
+			svgStr = toSVGString[processedExpr];
+			If[StringQ[svgStr],
+				AssociateTo[mimeData, "image/svg+xml" -> svgStr];
+				(* SVG metadata: empty dict; frontend uses viewBox for sizing *)
+				AssociateTo[mimeMeta, "image/svg+xml" -> Association[]];
+			];
+
+			(* Always generate a PNG as universal fallback *)
+			(* Try direct rasterization first *)
+			pngData = toImageData[processedExpr];
+			If[FailureQ[pngData],
+				(* Fallback 1: rasterize a Shallow form *)
+				pngData = toImageData[$trueFormatType[Shallow[expr]]];
+			];
+			If[FailureQ[pngData],
+				(* Fallback 2: rasterize $Failed symbol *)
+				pngData = toImageData[$trueFormatType[$Failed]];
+			];
+
+			If[!FailureQ[pngData],
+				pngBase64 = BaseEncode[pngData];
+				(* Extract image dimensions for metadata (divide by 2: 144dpi -> 72 logical px) *)
+				Block[
+					{parsedImg},
+					parsedImg = Quiet[ImportByteArray[pngData, "PNG"]];
+					If[Head[parsedImg] === Image,
+						{pngWidth, pngHeight} = ImageDimensions[parsedImg];
+						,
+						{pngWidth, pngHeight} = {0, 0};
+					];
+				];
+				AssociateTo[mimeData, "image/png" -> pngBase64];
+				AssociateTo[mimeData, "text/html" ->
+					StringJoin[
+						"<div>",
+						"<img alt=\"Output\" src=\"data:image/png;base64,",
+						pngBase64,
+						"\">",
+						"</div>"
+					]
+				];
+				(* Provide width/height in metadata at logical resolution *)
+				If[pngWidth > 0 && pngHeight > 0,
+					AssociateTo[mimeMeta, "image/png" ->
+						Association[
+							"width"  -> Ceiling[pngWidth / 2],
+							"height" -> Ceiling[pngHeight / 2]
+						]
+					];
+				];
+			,
+				(* All rasterization attempts failed: use hard-coded $Failed image *)
+				AssociateTo[mimeData, "image/png"  -> failedInBase64];
+				AssociateTo[mimeData, "text/html"  ->
+					StringJoin[
+						"<img alt=\"Output\" src=\"data:image/png;base64,",
+						failedInBase64,
+						"\">"
+					]
+				];
+			];
+
+			Return[Association["data" -> mimeData, "metadata" -> mimeMeta]];
 		];
 
 	(* end the private context for WolframLanguageForJupyter *)

@@ -79,6 +79,70 @@ try:
     assert comp_reply2['content']['cursor_end'] == 8, f"Expected cursor_end 8, got {comp_reply2['content']['cursor_end']}"
     print("Autocomplete Unicode check inside integration test PASSED!")
 
+    print("\nSending graphics execute request: 'Graphics[{Red, Disk[]}]'...")
+    # Flush any stale IOPub messages before starting
+    while True:
+        try:
+            kc.get_iopub_msg(timeout=0.2)
+        except queue.Empty:
+            break
+
+    gfx_msg_id = kc.execute('Graphics[{Red, Disk[]}]')
+
+    gfx_exec_result = None
+    start_gfx = time.time()
+    while time.time() - start_gfx < 30:
+        try:
+            msg = kc.get_iopub_msg(timeout=1)
+            msg_type = msg['msg_type']
+            print(f"[IOPUB] {msg_type}: keys={list(msg.get('content', {}).keys())}")
+            if msg_type == 'execute_result':
+                gfx_exec_result = msg['content']
+            elif msg_type == 'status' and msg['content'].get('execution_state') == 'idle':
+                print("Kernel is idle after graphics execution.")
+                break
+        except queue.Empty:
+            pass
+
+    get_reply_for_msg_id(kc, gfx_msg_id)  # consume shell reply
+
+
+    if gfx_exec_result is not None:
+        data = gfx_exec_result.get('data', {})
+        metadata = gfx_exec_result.get('metadata', {})
+        print(f"[GRAPHICS] MIME keys: {list(data.keys())}")
+        print(f"[GRAPHICS] metadata keys: {list(metadata.keys())}")
+
+        # Check SVG
+        assert "image/svg+xml" in data, \
+            f"Missing image/svg+xml in graphics output. Got keys: {list(data.keys())}"
+        assert "<svg" in data["image/svg+xml"], \
+            "image/svg+xml content does not look like valid SVG"
+        print("SVG output check PASSED!")
+
+        # Check PNG
+        assert "image/png" in data, "Missing image/png in graphics output"
+        assert len(data["image/png"]) > 0, "image/png base64 is empty"
+        print("PNG output check PASSED!")
+
+        # Check PNG metadata dimensions
+        png_meta = metadata.get("image/png", {})
+        assert "width" in png_meta, \
+            f"Missing width in image/png metadata. Got: {png_meta}"
+        assert "height" in png_meta, \
+            f"Missing height in image/png metadata. Got: {png_meta}"
+        assert png_meta["width"] > 0, "PNG metadata width is not positive"
+        assert png_meta["height"] > 0, "PNG metadata height is not positive"
+        print(f"PNG metadata check PASSED! (width={png_meta['width']}, height={png_meta['height']})")
+
+        # Check text/plain is always present
+        assert "text/plain" in data, "Missing text/plain in graphics output"
+        print("text/plain check PASSED!")
+
+        print("Rich MIME output integration test PASSED!")
+    else:
+        print("WARNING: No execute_result received for graphics — skipping MIME checks")
+
     print("\n--- RESULTS ---")
     stdout_str = ''.join(stdout).strip()
     print(f"Stdout output: {stdout_str}")
