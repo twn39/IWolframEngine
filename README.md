@@ -1,132 +1,118 @@
-# Wolfram Language kernel for Jupyter notebooks
+# IWolframEngine: Wolfram Language Kernel for Jupyter
 
-Jupyter provides a protocol (ZMQ) to connect their notebooks to various languages. This project defines a Wolfram Language kernel which can be used in Jupyter notebooks.
+Jupyter provides a protocol (ZMQ) to connect their notebooks to various programming language engines. This project implements a robust, feature-rich Wolfram Language kernel for Jupyter Notebooks and Jupyter Lab.
 
-# Prerequisites
+This repository is a customized version of the Wolfram Language kernel featuring enhanced reliability, auto-completion, and heartbeat support.
 
-On your machine, you will need:
+---
 
-* Jupyter
-* Wolfram Engine, i.e., a Wolfram Desktop or Mathematica installation
-* Optional, but recommended: `wolframscript`
+## Key Features & Improvements
 
-# Installation
+* **Robust Message Parser**: Built on a linear character-scanning state machine. It prevents kernel crashes on unbalanced brackets, nested JSON payloads, or trailing binary buffers.
+* **Smart Tab Autocomplete**: Resolves autocompletions for Wolfram Language built-ins, context-specific symbols (e.g., `Developer``), and short Unicode codes (e.g., `\\[Al` matches `α` and `ℵ`).
+* **Enhanced Heartbeat Thread**: Restored ZMQ heartbeat loop running on an isolated background sub-kernel. It is hidden from user-visible parallel kernels (e.g., `ParallelKernels[]`) to avoid interference, and includes a single-threaded `SessionSubmit` fallback for resource-constrained environments.
 
-There are **two** ways to make the Wolfram Language available in Jupyter:
+---
 
-* Using the `wolframscript` command line script interpreter
-* Using Wolfram Language commands from the `WolframLanguageForJupyter` paclet.
+## Prerequisites
 
-## Method 1: Using `wolframscript`
+To run this kernel, you need the following installed:
 
-On macOS/Unix: Clone the repository
+* **Jupyter** or **JupyterLab**
+* **Wolfram Engine** (e.g., Wolfram Desktop or Mathematica)
+* **wolframscript** (recommended)
+* **Python** (for running integration tests, managed via `uv`)
 
-	git clone https://github.com/WolframResearch/WolframLanguageForJupyter.git
+---
 
-Run the following command in your shell to make the Wolfram Language engine available to Jupyter:
+## Installation
 
-	./configure-jupyter.wls add
+There are two primary methods to make the Wolfram Language available in Jupyter.
 
-On Windows: Follow the fist two steps [here](https://help.github.com/en/github/creating-cloning-and-archiving-repositories/cloning-a-repository), and on the the third step select `Download Zip`, and unzip the file using a tool for Windows. Open PowerShell in the directory of the unzipped folder
+### Method 1: Command Line Installer (Recommended)
 
-Run the following command in your shell to make the Wolfram Language engine available to Jupyter:
+1. Clone the repository:
+   ```bash
+   git clone git@github.com:twn39/IWolframEngine.git
+   cd IWolframEngine
+   ```
+2. Register the kernel spec with Jupyter:
+   - **macOS / Linux**:
+     ```bash
+     ./configure-jupyter.wls add
+     ```
+   - **Windows**:
+     ```powershell
+     .\configure-jupyter.wls add
+     ```
 
-	.\configure-jupyter.wls add
+To specify custom binary paths, use:
+```bash
+./configure-jupyter.wls help
+```
 
-**Notes:** 
+### Method 2: Paclet Installation
 
-* If the location of the Wolfram Engine changes, you will have to run `configure-jupyter.wls` again.
+1. Build the `.paclet` file locally:
+   ```bash
+   ./configure-jupyter.wls build
+   ```
+2. Install the generated paclet in your Wolfram environment:
+   ```wolfram
+   PacletInstall["WolframLanguageForJupyter-0.9.3.paclet"]
+   ```
+3. Load the package and register the kernel:
+   ```wolfram
+   Needs["WolframLanguageForJupyter`"]
+   ConfigureJupyter["Add"]
+   ```
 
-* `configure-jupyter.wls` gives an error if the Wolfram Engine could not be added.
+---
 
-For more configuration options run:
+## Testing Your Installation
 
-	./configure-jupyter.wls help
+### 1. Verify Kernel Spec
+List registered kernels to check if `wolframlanguage` is found:
+```bash
+jupyter kernelspec list
+```
 
-## Method 2: Using Wolfram Language
+### 2. Run Diagnostic & Unit Tests
+We provide a comprehensive test suite in the `Tests` directory:
 
-You can download the latest version of the paclet here:
+- **Message Parser Unit Tests**:
+  ```bash
+  wolframscript -file Tests/test_actual_parser.wls
+  ```
+- **Autocomplete Unit Tests**:
+  ```bash
+  wolframscript -file Tests/test_autocomplete.wls
+  ```
+- **Heartbeat Thread Unit Tests**:
+  ```bash
+  wolframscript -file Tests/test_heartbeat.wls
+  ```
+- **Full Client Integration Tests** (requires `jupyter-client` and `ipykernel` python packages):
+  ```bash
+  uv run --with jupyter-client --with ipykernel python3 Tests/test_kernel.py
+  ```
 
-https://github.com/WolframResearch/WolframLanguageForJupyter/releases
+---
 
-To install the paclet, run the following command with Wolfram Language (replacing x, y, and z with the correct values):
+## Removing the Kernel
 
-	PacletInstall["WolframLanguageForJupyter-x.y.z.paclet"]
+### Using Command Line
+```bash
+./configure-jupyter.wls remove
+```
 
-To load the paclet, run:
+### Using Wolfram Language
+```wolfram
+ConfigureJupyter["Remove"]
+```
 
-	Needs["WolframLanguageForJupyter`"]
+---
 
-To add the Wolfram Language to Jupyter, run:
-
-	ConfigureJupyter["Add"]
-
-To specify a specific Jupyter binary, run:
-
-	ConfigureJupyter["Add", "JupyterInstallation" -> "..."]
-
-To specify a specific Wolfram Engine binary, run:
-
-	ConfigureJupyter["Add", "WolframEngineBinary" -> "..." ]
-
-Please note, however, that the value for the `"WolframEngineBinary"` option should not be a `wolframscript` path.
-
-# Testing your installation
-
-The following command should now list the Wolfram Engine:
-
-	jupyter kernelspec list
-
-The output should include a line like this:
-
-	wolframlanguage12    C:\ProgramData\jupyter\kernels\wolframlanguage12
-
-## To test your installation in a notebook, run the following command: 
-
-	jupyter notebook
-
-Then select Wolfram Language from the drop down menu:
-
-![menu](images/menu-01.png)
-
-After the In[] prompt you can now type a Wolfram Language command (use shift-enter to evaluate):
-
-![in-out-1](images/in-out-01.png)
-
-Outputs are either strings, for simple textual results, or images, for graphics and typeset results:
-
-![in-out-2](images/in-out-02.png)
-
-Any messages that occur during evaluation are displayed:
-
-![in-out-3](images/in-out-03.png)
-
-## To test your installation in the terminal, run the following command:
-	jupyter-console --kernel=wolframlanguage12
-
-# Building the WolframLanguageForJupyter paclet
-
-To build the WolframLanguageForJupyter paclet file yourself, run:
-
-	./configure-jupyter.wls build
-
-This creates the `WolframLanguageForJupyter-x.y.z.paclet` file (use the `PacletInfo.m` to increment the version).
-
-# Removing your installation
-
-## Method 1: Using `wolframscript`
-
-Run the following command to remove the Wolfram Language engine from Jupyter:
-
-	./configure-jupyter.wls remove
-
-## Method 2: Using Wolfram Language
-
-Run the following command:
-
-	ConfigureJupyter["Remove"]
-
-# Links
-
-* https://github.com/WolframResearch/WolframLanguageForJupyter
-* https://jupyter.readthedocs.io/en/latest/projects/content-projects.html
+## Links
+* **Repository**: [github.com/twn39/IWolframEngine](https://github.com/twn39/IWolframEngine)
+* **Jupyter Client Protocol**: [jupyter-client.readthedocs.io](https://jupyter-client.readthedocs.io/en/stable/messaging.html)
