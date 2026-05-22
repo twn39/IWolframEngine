@@ -338,48 +338,80 @@ If[
 
 	(* start heartbeat thread *)
 	(* see https://jupyter-client.readthedocs.io/en/stable/messaging.html#heartbeat-for-kernels *)
-	heldLocalSubmit =
-		Replace[
-			Hold[
-				(* submit a task for the new kernel *)
-				LocalSubmit[
-					(* get required ZMQ utilities in the new kernel *)
-					Get["ZeroMQLink`"];
-					(* open the heartbeat socket -- inserted with Replace and a placeholder *)
-					heartbeatSocket = SocketOpen[placeholder1, "ZMQ_REP"];
-					(* check for any problems *)
-					If[
-						FailureQ[heartbeatSocket],
-						Quit[];
-					];
-					(* do this "forever" *)
-					While[
-						True,
-						(* wait for new data on the heartbeat socket *)
-						SocketWaitNext[{heartbeatSocket}];
-						(* receive the data *)
-						heartbeatRecv = SocketReadMessage[heartbeatSocket];
-						(* check for any problems *)
-						If[
-							FailureQ[heartbeatRecv],
-							Continue[];
-						];
-						(* and loop the data back to Jupyter *)
-						socketWriteFunction[
-							heartbeatSocket, 
-							heartbeatRecv,
-							"Multipart" -> False
-						];
-					];,
-					HandlerFunctions-> Association["TaskFinished" -> Quit]
-				]
-			],
-			(* see above *)
-			placeholder1 -> heartbeatString,
-			Infinity
+	Block[{hbKernels, hbKernel, useFallback = False},
+		(* Try to load Parallel Developer tools and launch a subkernel *)
+		Quiet[Needs["Parallel`Developer`"]];
+		hbKernels = Quiet[LaunchKernels[1]];
+		If[FailureQ[hbKernels] || Length[hbKernels] == 0,
+			useFallback = True;,
+			(* Get subkernel and isolate it from user-visible parallel kernel lists *)
+			hbKernel = First[hbKernels];
+			Parallel`Protected`$kernels = Select[Parallel`Protected`$kernels, # =!= hbKernel &];
 		];
-	(* start the heartbeat thread *)
-	(* Quiet[ReleaseHold[heldLocalSubmit]]; *)
+
+		If[Not[useFallback],
+			(* A. Parallel sub-kernel approach (0% idle CPU, fully non-blocking) *)
+			Block[{heldSend},
+				heldSend = Replace[
+					Hold[
+						Parallel`Developer`Send[hbKernel,
+							Needs["ZeroMQLink`"];
+							Block[{writeFunc, socket, msg},
+								writeFunc = If[TrueQ[$VersionNumber < 12.0],
+									ZeroMQLink`Private`ZMQWriteInternal,
+									ZeroMQLink`ZMQSocketWriteMessage
+								];
+								socket = SocketOpen[placeholderAddr, "ZMQ_REP"];
+								If[FailureQ[socket],
+									Quit[];
+								];
+								While[True,
+									SocketWaitNext[{socket}];
+									msg = SocketReadMessage[socket];
+									If[FailureQ[msg], Continue[]];
+									writeFunc[socket, msg, "Multipart" -> False];
+								];
+							]
+						]
+					],
+					placeholderAddr -> heartbeatString,
+					Infinity
+				];
+				WolframLanguageForJupyter`Private`hbKernel = hbKernel;
+				Quiet[ReleaseHold[heldSend]];
+				(* Register cleanup handler on exit to close the subkernel *)
+				$Epilog = ($Epilog; Quiet[Close[WolframLanguageForJupyter`Private`hbKernel]];);
+			];
+			,
+			(* B. Graceful fallback: SessionSubmit scheduled task (runs when main kernel is idle) *)
+			Quiet[
+				Block[{socket, writeFunc},
+					writeFunc = If[TrueQ[$VersionNumber < 12.0],
+						ZeroMQLink`Private`ZMQWriteInternal,
+						ZeroMQLink`ZMQSocketWriteMessage
+					];
+					socket = SocketOpen[heartbeatString, "ZMQ_REP"];
+					If[Not[FailureQ[socket]],
+						SessionSubmit[
+							ScheduledTask[
+								If[TrueQ[SocketReadyQ[socket]],
+									Block[{msg},
+										msg = SocketReadMessage[socket];
+										If[Not[FailureQ[msg]],
+											writeFunc[socket, msg, "Multipart" -> False];
+										];
+									];
+								],
+								0.1
+							]
+						];
+						(* Register cleanup handler on exit to close the socket *)
+						$Epilog = ($Epilog; Quiet[Close[socket]];);
+					];
+				]
+			];
+		];
+	];
 
 	(* end the private context for WolframLanguageForJupyter *)
 	End[]; (* `Private`` *)

@@ -40,63 +40,106 @@ If[
 *************************************)
 
 	(* transform received frame into a structured Association *)
+	(* Robust linear-time parser for concatenated Jupyter message parts *)
+	parseJupyterMessage[frameStr_String] := Module[
+		{delimPos, ident, signature, rest, jsonObjects, jsonStartPos, chars, len, 
+		 bracketDepth, inString, escaped, i, c, jsonStart, jsonString},
+		
+		delimPos = StringPosition[frameStr, "<IDS|MSG>"];
+		If[Length[delimPos] == 0, Return[$Failed]];
+		delimPos = delimPos[[1]];
+		
+		ident = StringTake[frameStr, delimPos[[1]] - 1];
+		rest = StringDrop[frameStr, delimPos[[2]]];
+		
+		jsonStartPos = StringPosition[rest, "{"];
+		If[Length[jsonStartPos] == 0, Return[$Failed]];
+		jsonStartPos = jsonStartPos[[1, 1]];
+		
+		signature = StringTake[rest, jsonStartPos - 1];
+		rest = StringDrop[rest, jsonStartPos - 1];
+		
+		chars = Characters[rest];
+		len = Length[chars];
+		jsonObjects = {};
+		i = 1;
+		
+		Do[
+			While[i <= len && chars[[i]] =!= "{", i++];
+			If[i > len, Return[$Failed]];
+			
+			jsonStart = i;
+			bracketDepth = 0;
+			inString = False;
+			escaped = False;
+			
+			While[i <= len,
+				c = chars[[i]];
+				If[inString,
+					If[escaped,
+						escaped = False;,
+						If[c === "\\",
+							escaped = True;,
+							If[c === "\"", inString = False;]
+						]
+					];,
+					If[c === "\"",
+						inString = True;
+						escaped = False;,
+						If[c === "{",
+							bracketDepth++;,
+							If[c === "}",
+								bracketDepth--;
+								If[bracketDepth == 0,
+									jsonString = StringJoin[chars[[jsonStart ;; i]]];
+									AppendTo[jsonObjects, jsonString];
+									i++;
+									Break[];
+								];
+							]
+						]
+					]
+				];
+				i++;
+			];
+			If[bracketDepth > 0, Return[$Failed]];,
+			{4}
+		];
+		
+		If[Length[jsonObjects] < 4, Return[$Failed]];
+		
+		Return[<|
+			"ident" -> ident,
+			"signature" -> signature,
+			"header" -> jsonObjects[[1]],
+			"pheader" -> jsonObjects[[2]],
+			"metadata" -> jsonObjects[[3]],
+			"content" -> jsonObjects[[4]]
+		|>];
+	];
+
+	(* transform received frame into a structured Association *)
 	getFrameAssoc[baFrame_ByteArray] :=
 		Module[
 			{
-				(* string form of the byte array *)
 				frameStr,
-				(* storage for the various value fields of the received frame *)
-				identLen,
-				header,
-				pheader,
-				metadata,
-				content
+				parsed,
+				identLen
 			},
 
 			(* set frameStr to the string form of the byte array of the received frame *)
 			frameStr = Quiet[ByteArrayToString[baFrame]];
 
-			(* get the values (of key-value pairs) from the string frame *)
-			{identLen, header, pheader, metadata, content} =
-				First[
-					(* pick out the values using the expected form of the frame *)
-					(* see https://jupyter-client.readthedocs.io/en/stable/messaging.html *)
-					StringCases[
-						frameStr,
-						Shortest[ident1___] ~~ "<IDS|MSG>" ~~ Shortest[___] ~~ 
-							"{" ~~ Shortest[json2___] ~~ "}" ~~
-								"{" ~~ Shortest[json3___] ~~ "}" ~~
-									"{" ~~ Shortest[json4___] ~~ "}" ~~
-										"{" ~~ Shortest[json5___] ~~ "}" ~~
-											EndOfString :> 
-							Prepend[
-								(* add back in the brackets *)
-								(
-									Association[
-										ImportByteArray[
-											StringToByteArray[
-												StringJoin["{", #1, "}"]
-											],
-											"JSON"
-										]
-									] &
-								) /@ {json2,json3,json4,json5},
-								(* use the length of ident1 *)
-								StringLength[ident1]
-							]
-					]
-				];
+			parsed = parseJupyterMessage[frameStr];
+			If[FailureQ[parsed], Return[$Failed]];
 
-			(* return an association with:
-				* an ident key with a byte array value
-				* the header of the original frame imported as JSON
-				* the content of the original frame imported as JSON
-				*)
+			identLen = StringLength[parsed["ident"]];
+
 			Return[
 				Association[
 					"ident" -> baFrame[[;;identLen]],
-					"header" -> header,
-					"content" -> content
+					"header" -> Association[ImportByteArray[StringToByteArray[parsed["header"]], "JSON"]],
+					"content" -> Association[ImportByteArray[StringToByteArray[parsed["content"]], "JSON"]]
 				]
 			];
 		];

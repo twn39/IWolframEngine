@@ -396,7 +396,8 @@ If[
 		Module[
 			{
 				(* for storing the code string to offer completion suggestions on *)
-				codeStr
+				codeStr,
+				completions
 			},
 			(* get the code string to rewrite the named characters of, ending at the cursor *)
 			codeStr =
@@ -409,23 +410,17 @@ If[
 				];
 			(* set the appropriate reply type *)
 			loopState["replyMsgType"] = "complete_reply";
+			
+			completions = getCompletions[codeStr];
+			
 			(* set the content of the reply to a list of rewrites for any named characters in the code string *)
 			loopState["replyContent"] = 
 				ByteArrayToString[
 					ExportByteArray[
 						Association[
-							"matches" ->
-								DeleteDuplicates[
-									Prepend[
-										Select[
-											rewriteNamedCharacters[codeStr],
-											(!containsPUAQ[#1])&
-										],
-										codeStr
-									]
-								],
-							"cursor_start" -> 0,
-							"cursor_end" -> StringLength[codeStr],
+							"matches" -> completions["matches"],
+							"cursor_start" -> completions["cursor_start"],
+							"cursor_end" -> completions["cursor_end"],
 							"metadata" -> {},
 							"status" -> "ok"
 						], 

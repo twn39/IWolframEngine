@@ -74,6 +74,55 @@ If[
 			];
 		];
 
+	(* get code completion list *)
+	getCompletions[codeStr_String] := Module[
+		{namedPrefix, symbolPrefix, symbolMatches, prefixMatch},
+		
+		(* 1. Match Named Character prefix *)
+		namedPrefix = StringCases[
+			codeStr,
+			(prefix : (("\\[" | verticalEllipsis) ~~ (WordCharacter | "$")...)) ~~ EndOfString :> prefix
+		];
+		
+		If[Length[namedPrefix] > 0,
+			namedPrefix = namedPrefix[[1]];
+			Return[
+				Association[
+					"matches" -> Select[rewriteNamedCharacters[namedPrefix], (!containsPUAQ[#1])&],
+					"cursor_start" -> StringLength[codeStr] - StringLength[namedPrefix],
+					"cursor_end" -> StringLength[codeStr]
+				]
+			];
+		];
+		
+		(* 2. Match standard symbol prefix *)
+		symbolPrefix = StringCases[
+			codeStr,
+			(prefix : ((LetterCharacter | "$" | "`") ~~ (WordCharacter | "$" | "`")...)) ~~ EndOfString :> prefix
+		];
+		
+		If[Length[symbolPrefix] > 0,
+			symbolPrefix = symbolPrefix[[1]];
+			symbolMatches = Names[symbolPrefix ~~ ___];
+			Return[
+				Association[
+					"matches" -> Take[symbolMatches, UpTo[100]],
+					"cursor_start" -> StringLength[codeStr] - StringLength[symbolPrefix],
+					"cursor_end" -> StringLength[codeStr]
+				]
+			];
+		];
+		
+		(* 3. Fallback *)
+		Return[
+			Association[
+				"matches" -> {},
+				"cursor_start" -> StringLength[codeStr],
+				"cursor_end" -> StringLength[codeStr]
+			]
+		];
+	];
+
 	(* end the private context for WolframLanguageForJupyter *)
 	End[]; (* `Private` *)
 
