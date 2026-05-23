@@ -295,7 +295,6 @@ class WolframLanguageKernel(Kernel):
     def create_manipulate_widget(self, data):
         import ipywidgets as widgets
         import sys
-        from IPython.display import publish_display_data
         from wolframclient.language.expression import WLFunction, WLSymbol
 
         expr_str = data["expression"]
@@ -347,32 +346,46 @@ class WolframLanguageKernel(Kernel):
                 func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateManipulate"), expr_str, bindings)
                 eval_res = self.wl_session.evaluate(func)
                 
-                output.clear_output(wait=True)
-                with output:
-                    if isinstance(eval_res, dict) and eval_res.get("status") == "ok":
-                        stdout = eval_res.get("captured_stdout", "")
-                        if stdout:
-                            sys.stdout.write(stdout)
-                            sys.stdout.flush()
+                new_outputs = []
+                if isinstance(eval_res, dict) and eval_res.get("status") == "ok":
+                    stdout = eval_res.get("captured_stdout", "")
+                    if stdout:
+                        new_outputs.append({
+                            "output_type": "stream",
+                            "name": "stdout",
+                            "text": stdout
+                        })
+                    
+                    stderr = eval_res.get("captured_stderr", [])
+                    if stderr:
+                        new_outputs.append({
+                            "output_type": "stream",
+                            "name": "stderr",
+                            "text": "\n".join(stderr) + "\n"
+                        })
                         
-                        stderr = eval_res.get("captured_stderr", [])
-                        if stderr:
-                            sys.stderr.write("\n".join(stderr) + "\n")
-                            sys.stderr.flush()
-                            
-                        mime = eval_res.get("mime_bundle", {})
-                        if mime:
-                            data_dict = mime.get("data", {})
-                            metadata_dict = mime.get("metadata", {})
-                            publish_display_data(data=data_dict, metadata=metadata_dict)
-                    else:
-                        sys.stderr.write(f"Error evaluating Manipulate: {eval_res}\n")
-                        sys.stderr.flush()
+                    mime = eval_res.get("mime_bundle", {})
+                    if mime:
+                        data_dict = mime.get("data", {})
+                        metadata_dict = mime.get("metadata", {})
+                        new_outputs.append({
+                            "output_type": "display_data",
+                            "data": data_dict,
+                            "metadata": metadata_dict
+                        })
+                else:
+                    new_outputs.append({
+                        "output_type": "stream",
+                        "name": "stderr",
+                        "text": f"Error evaluating Manipulate: {eval_res}\n"
+                    })
+                output.outputs = tuple(new_outputs)
             except Exception as e:
-                output.clear_output(wait=True)
-                with output:
-                    sys.stderr.write(f"Error in update_output: {e}\n")
-                    sys.stderr.flush()
+                output.outputs = ({
+                    "output_type": "stream",
+                    "name": "stderr",
+                    "text": f"Error in update_output: {e}\n"
+                },)
                     
         for ctrl in control_list:
             ctrl.observe(update_output, names='value')
@@ -382,6 +395,7 @@ class WolframLanguageKernel(Kernel):
         controls_layout = widgets.VBox(control_list)
         widget_box = widgets.VBox([controls_layout, output])
         return widget_box
+
 
     def request_stdin_from_frontend(self, prompt):
         if not getattr(self, "_allow_stdin", False):
