@@ -67,7 +67,46 @@ class TestWidgets(unittest.TestCase):
             self.assertIn('application/vnd.jupyter.widget-view+json', data_list[0])
             self.assertEqual(data_list[0]['application/vnd.jupyter.widget-view+json']['model_id'], "test-model-id-12345")
             
-            print("Widgets serialization, IntSlider and FloatSlider type mapping test PASSED!")
+            # Reset mock counts
+            mock_widgets.IntSlider.reset_mock()
+            mock_widgets.FloatSlider.reset_mock()
+            mock_widgets.Dropdown.reset_mock()
+            mock_widgets.Checkbox.reset_mock()
+            
+            # Test 3: Slider with symbolic bounds, Dropdown and Checkbox
+            code3 = 'Manipulate[Plot[Sin[f x + p], {x, 0, 10}], {f, 1.0, 10.0}, {p, 0, 2 Pi}, {grid, {False, True}}, {color, {Red, Green, Blue}}]'
+            res3 = loop.run_until_complete(kernel.do_execute(code3, silent=False))
+            self.assertEqual(res3['status'], 'ok')
+            
+            # FloatSlider for f (1.0 to 10.0)
+            # FloatSlider for p (0 to 2 Pi, which evaluates to ~6.28)
+            self.assertEqual(mock_widgets.FloatSlider.call_count, 2)
+            f_args = mock_widgets.FloatSlider.call_args_list[0][1]
+            self.assertEqual(f_args['min'], 1.0)
+            self.assertEqual(f_args['max'], 10.0)
+            self.assertEqual(f_args['description'], 'f')
+            
+            p_args = mock_widgets.FloatSlider.call_args_list[1][1]
+            self.assertEqual(p_args['min'], 0.0)
+            self.assertAlmostEqual(p_args['max'], 6.283185307179586, places=5)
+            self.assertEqual(p_args['description'], 'p')
+            
+            # Checkbox for grid
+            mock_widgets.Checkbox.assert_called_once()
+            checkbox_args = mock_widgets.Checkbox.call_args[1]
+            self.assertEqual(checkbox_args['description'], 'grid')
+            
+            # Dropdown for color
+            mock_widgets.Dropdown.assert_called_once()
+            dropdown_args = mock_widgets.Dropdown.call_args[1]
+            self.assertEqual(dropdown_args['description'], 'color')
+            self.assertEqual(dropdown_args['options'], [
+                ('RGBColor[1, 0, 0]', 'RGBColor[1, 0, 0]'),
+                ('RGBColor[0, 1, 0]', 'RGBColor[0, 1, 0]'),
+                ('RGBColor[0, 0, 1]', 'RGBColor[0, 0, 1]')
+            ])
+            
+            print("Widgets serialization, IntSlider, FloatSlider, Checkbox, Dropdown and Symbolic Bounds test PASSED!")
             
         finally:
             kernel.do_shutdown(restart=False)

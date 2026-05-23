@@ -1040,7 +1040,13 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 	Input[prompt_ : ""] := getStdinFromSocket[prompt, "Input"];
 	InputString[prompt_ : ""] := getStdinFromSocket[prompt, "InputString"];
 	parseVariableSpec[spec_] := Module[
-		{varName, initVal, minVal, maxVal, stepVal, choices, type, nameStr},
+		{varName, initVal, minVal, maxVal, stepVal, choices, type, nameStr, evalVal},
+		evalVal[val_] := Which[
+			IntegerQ[val] || Head[val] === Real, val,
+			NumericQ[val], N[val],
+			True, val
+		];
+		
 		If[ListQ[spec] && Length[spec] >= 2,
 			If[ListQ[spec[[1]]],
 				varName = spec[[1, 1]];
@@ -1053,28 +1059,39 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 			
 			If[ListQ[spec[[2]]],
 				choices = spec[[2]];
-				If[initVal === None, initVal = First[choices]];
 				If[Sort[choices] === {False, True},
 					type = "Checkbox";
+					If[initVal === None, initVal = False];
+					Return[Association[
+						"name" -> nameStr,
+						"type" -> type,
+						"initial" -> initVal,
+						"choices" -> choices
+					]];
 				,
 					type = "Dropdown";
+					If[initVal === None, initVal = First[choices]];
+					Return[Association[
+						"name" -> nameStr,
+						"type" -> type,
+						"initial" -> ToString[initVal, InputForm],
+						"choices" -> (Association["label" -> ToString[#], "value" -> ToString[#, InputForm]] & /@ choices)
+					]];
 				];
-				Return[Association[
-					"name" -> nameStr,
-					"type" -> type,
-					"initial" -> initVal,
-					"choices" -> choices
-				]];
 			];
 			
-			minVal = spec[[2]];
-			maxVal = spec[[3]];
+			minVal = evalVal[spec[[2]]];
+			maxVal = evalVal[spec[[3]]];
 			If[Length[spec] >= 4,
-				stepVal = spec[[4]];
+				stepVal = evalVal[spec[[4]]];
 			,
 				stepVal = None;
 			];
-			If[initVal === None, initVal = minVal];
+			If[initVal === None, 
+				initVal = minVal;
+			,
+				initVal = evalVal[initVal];
+			];
 			
 			Return[Association[
 				"name" -> nameStr,
@@ -1100,7 +1117,7 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 	];
 
 	evaluateManipulate[exprStr_String, bindings_Association] := Module[
-		{heldExpr, rules, substituted, evalResult, mimeBundle},
+		{heldExpr, rules, substituted, evalResult, mimeBundle, toVal},
 		
 		(* Redirect buffers *)
 		loopState["capturedStdout"] = {};
@@ -1118,8 +1135,11 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 		SetAttributes[messageFormatter, HoldAll];
 		Internal`$MessageFormatter = messageFormatter;
 		
+		toVal[val_String] := ToExpression[val];
+		toVal[val_] := val;
+		
 		heldExpr = ToExpression[exprStr, InputForm];
-		rules = Symbol[#1] -> bindings[#1] & /@ Keys[bindings];
+		rules = Symbol[#1] -> toVal[bindings[#1]] & /@ Keys[bindings];
 		substituted = ReplaceAll[heldExpr, rules];
 		
 		evalResult = Quiet[ReleaseHold[substituted]];

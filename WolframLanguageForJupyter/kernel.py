@@ -331,8 +331,9 @@ class WolframLanguageKernel(Kernel):
                     continuous_update=False
                 )
             elif var_type == "Dropdown":
+                choices = [(choice["label"], choice["value"]) for choice in var["choices"]]
                 control = widgets.Dropdown(
-                    options=var["choices"],
+                    options=choices,
                     value=initial,
                     description=name
                 )
