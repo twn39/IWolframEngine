@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import signal
 import asyncio
 import socket
 import threading
@@ -252,7 +253,44 @@ class WolframLanguageKernel(Kernel):
         self.main_loop = asyncio.get_event_loop()
         self.stdin_server = StdinServer(self)
         self.stdin_server.start()
+        
+        self._executing = False
+        self._interrupted = False
+        
+        self.old_sigint_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self.handle_sigint)
+        
         self.start_wolfram_session()
+
+    def handle_sigint(self, signum, frame):
+        self.log.info("SIGINT received in Python kernel.")
+        if getattr(self, "_executing", False):
+            self._interrupted = True
+            if self.wl_session:
+                try:
+                    self.log.info("Terminating running Wolfram session due to interrupt...")
+                    self.wl_session.terminate()
+                except Exception as e:
+                    self.log.warning(f"Failed to terminate session in SIGINT handler: {e}")
+        if callable(self.old_sigint_handler):
+            try:
+                self.old_sigint_handler(signum, frame)
+            except KeyboardInterrupt:
+                raise
+
+    def restart_wolfram_session(self):
+        self.log.info("Restarting Wolfram Language session...")
+        try:
+            if self.wl_session:
+                self.wl_session.terminate()
+        except Exception as e:
+            self.log.warning(f"Error terminating session: {e}")
+        
+        try:
+            self.start_wolfram_session()
+            self.log.info("Wolfram Language session restarted successfully.")
+        except Exception as e:
+            self.log.error(f"Failed to restart Wolfram Language session: {e}")
 
     def request_stdin_from_frontend(self, prompt):
         if not getattr(self, "_allow_stdin", False):
@@ -334,6 +372,8 @@ class WolframLanguageKernel(Kernel):
         self._allow_stdin = allow_stdin
         import contextvars
         self._current_context = contextvars.copy_context()
+        self._executing = True
+        self._interrupted = False
         try:
             func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"), code)
             res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
@@ -393,14 +433,36 @@ class WolframLanguageKernel(Kernel):
                 'user_expressions': {},
             }
 
-        except Exception as e:
+        except (KeyboardInterrupt, asyncio.CancelledError, Exception) as e:
+            if getattr(self, "_interrupted", False):
+                self._interrupted = False
+                self.restart_wolfram_session()
+                self.send_response(self.iopub_socket, 'error', {
+                    'ename': 'KeyboardInterrupt',
+                    'evalue': 'Execution interrupted by user. The Wolfram Kernel process has been restarted.',
+                    'traceback': ['KeyboardInterrupt: Execution interrupted by user. All variables and definitions have been reset.']
+                })
+                return {
+                    'status': 'error',
+                    'ename': 'KeyboardInterrupt',
+                    'evalue': 'Execution interrupted by user. The Wolfram Kernel process has been restarted.',
+                    'traceback': ['KeyboardInterrupt: Execution interrupted by user. All variables and definitions have been reset.']
+                }
+            
+            # Self-healing: if session is dead, restart it
             self.log.error(f"Execution error: {e}")
+            is_dead = "not running" in str(e) or not (self.wl_session and self.wl_session.started)
+            if is_dead:
+                self.restart_wolfram_session()
+                
             return {
                 'status': 'error',
                 'ename': type(e).__name__,
                 'evalue': str(e),
-                'traceback': []
+                'traceback': [str(e)]
             }
+        finally:
+            self._executing = False
 
     def do_complete(self, code, cursor_pos):
         prefix = code[:cursor_pos]
