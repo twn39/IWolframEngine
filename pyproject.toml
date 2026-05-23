@@ -11,6 +11,7 @@ requires-python = ">=3.8"
 dependencies = [
     "ipykernel>=6.0.0",
     "wolframclient>=1.1.0",
+    "ipywidgets",
 ]
 
 [tool.setuptools]

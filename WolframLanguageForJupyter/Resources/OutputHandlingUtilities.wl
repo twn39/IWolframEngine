@@ -883,6 +883,18 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 				];
 			];
 
+			(* --- Manipulate Path: Intercept early to generate structured widget data --- *)
+			If[Head[expr] === Manipulate,
+				Return[
+					Association[
+						"data" -> Association[
+							"application/x-wolfram-manipulate" -> serializeManipulate[expr]
+						],
+						"metadata" -> Association[]
+					]
+				];
+			];
+
 			processedExpr = $trueFormatType[expr];
 
 			(* always generate a text/plain representation as required by the Jupyter spec *)
@@ -1027,7 +1039,104 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 	DownValues[InputString] = {};
 	Input[prompt_ : ""] := getStdinFromSocket[prompt, "Input"];
 	InputString[prompt_ : ""] := getStdinFromSocket[prompt, "InputString"];
-	Protect[Input, InputString];
+	parseVariableSpec[spec_] := Module[
+		{varName, initVal, minVal, maxVal, stepVal, choices, type, nameStr},
+		If[ListQ[spec] && Length[spec] >= 2,
+			If[ListQ[spec[[1]]],
+				varName = spec[[1, 1]];
+				initVal = spec[[1, 2]];
+			,
+				varName = spec[[1]];
+				initVal = None;
+			];
+			nameStr = ToString[varName];
+			
+			If[ListQ[spec[[2]]],
+				choices = spec[[2]];
+				If[initVal === None, initVal = First[choices]];
+				If[Sort[choices] === {False, True},
+					type = "Checkbox";
+				,
+					type = "Dropdown";
+				];
+				Return[Association[
+					"name" -> nameStr,
+					"type" -> type,
+					"initial" -> initVal,
+					"choices" -> choices
+				]];
+			];
+			
+			minVal = spec[[2]];
+			maxVal = spec[[3]];
+			If[Length[spec] >= 4,
+				stepVal = spec[[4]];
+			,
+				stepVal = None;
+			];
+			If[initVal === None, initVal = minVal];
+			
+			Return[Association[
+				"name" -> nameStr,
+				"type" -> "Slider",
+				"initial" -> initVal,
+				"min" -> minVal,
+				"max" -> maxVal,
+				"step" -> stepVal
+			]];
+		];
+		$Failed
+	];
+
+	serializeManipulate[HoldPattern[Manipulate[expr_, vars__]]] := Module[
+		{varList, parsedVars},
+		varList = {vars};
+		parsedVars = Map[parseVariableSpec, varList];
+		Association[
+			"type" -> "Manipulate",
+			"expression" -> ToString[Hold[expr], InputForm],
+			"variables" -> DeleteCases[parsedVars, $Failed]
+		]
+	];
+
+	evaluateManipulate[exprStr_String, bindings_Association] := Module[
+		{heldExpr, rules, substituted, evalResult, mimeBundle},
+		
+		(* Redirect buffers *)
+		loopState["capturedStdout"] = {};
+		loopState["capturedStderr"] = {};
+		loopState["LastMessages"] = {};
+		loopState["printFunction"] = (AppendTo[loopState["capturedStdout"], #1] &);
+		
+		messageFormatter[messageName_, messageText_] :=
+			Module[{msgString},
+				msgString = ToString[System`ColonForm[HoldForm[messageName], messageText]];
+				AppendTo[loopState["LastMessages"], msgString];
+				AppendTo[loopState["capturedStderr"], msgString];
+				msgString
+			];
+		SetAttributes[messageFormatter, HoldAll];
+		Internal`$MessageFormatter = messageFormatter;
+		
+		heldExpr = ToExpression[exprStr, InputForm];
+		rules = Symbol[#1] -> bindings[#1] & /@ Keys[bindings];
+		substituted = ReplaceAll[heldExpr, rules];
+		
+		evalResult = Quiet[ReleaseHold[substituted]];
+		
+		loopState["printFunction"] = False;
+		Unset[messageFormatter];
+		Unset[Internal`$MessageFormatter];
+		
+		mimeBundle = toMimeBundle[evalResult];
+		
+		Association[
+			"status" -> "ok",
+			"mime_bundle" -> mimeBundle,
+			"captured_stdout" -> StringJoin[loopState["capturedStdout"]],
+			"captured_stderr" -> loopState["capturedStderr"]
+		]
+	];
 
 	(* end the private context for WolframLanguageForJupyter *)
 	End[]; (* `Private` *)

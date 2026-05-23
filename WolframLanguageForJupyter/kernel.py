@@ -292,6 +292,97 @@ class WolframLanguageKernel(Kernel):
         except Exception as e:
             self.log.error(f"Failed to restart Wolfram Language session: {e}")
 
+    def create_manipulate_widget(self, data):
+        import ipywidgets as widgets
+        import sys
+        from IPython.display import publish_display_data
+        from wolframclient.language.expression import WLFunction, WLSymbol
+
+        expr_str = data["expression"]
+        variables = data["variables"]
+        
+        controls = {}
+        control_list = []
+        
+        for var in variables:
+            name = var["name"]
+            var_type = var["type"]
+            initial = var["initial"]
+            
+            if var_type == "Slider":
+                is_float = isinstance(var["min"], float) or isinstance(var["max"], float) or isinstance(var["step"], float)
+                slider_cls = widgets.FloatSlider if is_float else widgets.IntSlider
+                step = var["step"] if var["step"] is not None else (0.1 if is_float else 1)
+                
+                control = slider_cls(
+                    value=initial,
+                    min=var["min"],
+                    max=var["max"],
+                    step=step,
+                    description=name,
+                    continuous_update=False
+                )
+            elif var_type == "Dropdown":
+                control = widgets.Dropdown(
+                    options=var["choices"],
+                    value=initial,
+                    description=name
+                )
+            elif var_type == "Checkbox":
+                control = widgets.Checkbox(
+                    value=bool(initial),
+                    description=name
+                )
+            else:
+                continue
+                
+            controls[name] = control
+            control_list.append(control)
+            
+        output = widgets.Output()
+        
+        def update_output(*args):
+            bindings = {name: ctrl.value for name, ctrl in controls.items()}
+            try:
+                func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateManipulate"), expr_str, bindings)
+                eval_res = self.wl_session.evaluate(func)
+                
+                output.clear_output(wait=True)
+                with output:
+                    if isinstance(eval_res, dict) and eval_res.get("status") == "ok":
+                        stdout = eval_res.get("captured_stdout", "")
+                        if stdout:
+                            sys.stdout.write(stdout)
+                            sys.stdout.flush()
+                        
+                        stderr = eval_res.get("captured_stderr", [])
+                        if stderr:
+                            sys.stderr.write("\n".join(stderr) + "\n")
+                            sys.stderr.flush()
+                            
+                        mime = eval_res.get("mime_bundle", {})
+                        if mime:
+                            data_dict = mime.get("data", {})
+                            metadata_dict = mime.get("metadata", {})
+                            publish_display_data(data=data_dict, metadata=metadata_dict)
+                    else:
+                        sys.stderr.write(f"Error evaluating Manipulate: {eval_res}\n")
+                        sys.stderr.flush()
+            except Exception as e:
+                output.clear_output(wait=True)
+                with output:
+                    sys.stderr.write(f"Error in update_output: {e}\n")
+                    sys.stderr.flush()
+                    
+        for ctrl in control_list:
+            ctrl.observe(update_output, names='value')
+            
+        update_output()
+        
+        controls_layout = widgets.VBox(control_list)
+        widget_box = widgets.VBox([controls_layout, output])
+        return widget_box
+
     def request_stdin_from_frontend(self, prompt):
         if not getattr(self, "_allow_stdin", False):
             return "$Failed"
@@ -416,6 +507,24 @@ class WolframLanguageKernel(Kernel):
             # If success, publish execute_result if not silent
             mime_bundle = res.get("mime_bundle")
             exec_count = res.get("execution_count", self.execution_count)
+            
+            if mime_bundle and "application/x-wolfram-manipulate" in mime_bundle.get("data", {}):
+                manipulate_data = mime_bundle["data"]["application/x-wolfram-manipulate"]
+                try:
+                    widget_box = self.create_manipulate_widget(manipulate_data)
+                    mime_bundle = {
+                        "data": {
+                            "application/vnd.jupyter.widget-view+json": {
+                                "version_major": 2,
+                                "version_minor": 0,
+                                "model_id": widget_box.model_id
+                            },
+                            "text/plain": repr(widget_box)
+                        },
+                        "metadata": {}
+                    }
+                except Exception as w_err:
+                    self.log.error(f"Error creating manipulate widget: {w_err}")
             
             if not silent and mime_bundle:
                 data = mime_bundle.get("data", {})
