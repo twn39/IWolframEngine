@@ -245,6 +245,9 @@ class WolframLanguageKernel(Kernel):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        if not getattr(self, "log", None):
+            import logging
+            self.log = logging.getLogger("WolframLanguageKernel")
         self.wl_session = None
         self.main_loop = asyncio.get_event_loop()
         self.stdin_server = StdinServer(self)
@@ -259,7 +262,10 @@ class WolframLanguageKernel(Kernel):
         
         def run_in_main_thread():
             try:
-                res = self.raw_input(prompt)
+                if hasattr(self, "_current_context") and self._current_context:
+                    res = self._current_context.run(self.raw_input, prompt)
+                else:
+                    res = self.raw_input(prompt)
                 future.set_result(res)
             except Exception as e:
                 future.set_exception(e)
@@ -324,7 +330,10 @@ class WolframLanguageKernel(Kernel):
                 'user_expressions': {},
             }
             
+        self.main_loop = asyncio.get_running_loop()
         self._allow_stdin = allow_stdin
+        import contextvars
+        self._current_context = contextvars.copy_context()
         try:
             func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"), code)
             res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))

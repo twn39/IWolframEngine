@@ -30,7 +30,7 @@ class TestStdin(unittest.TestCase):
             # Check published outputs
             data_list = [c['data'] for m, c in responses if m == 'execute_result']
             self.assertTrue(len(data_list) > 0)
-            self.assertEqual(data_list[0]['text/plain'], '"Wolfram User"')
+            self.assertEqual(data_list[0]['text/plain'], 'Wolfram User')
         finally:
             kernel.do_shutdown(restart=False)
             loop.close()

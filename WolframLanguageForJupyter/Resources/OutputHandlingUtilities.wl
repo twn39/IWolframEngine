@@ -1000,22 +1000,18 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 		
 		(* Send request *)
 		req = ExportString[Association["prompt" -> prompt, "type" -> type], "JSON", "Compact" -> True];
-		SocketWrite[socket, req];
+		WriteString[socket, req];
 		
 		(* Read reply *)
-		response = SocketReadMessage[socket];
+		response = ReadString[socket];
 		Close[socket];
-		
-		If[Head[response] === ByteArray,
-			response = ByteArrayToString[response]
-		];
 		
 		If[FailureQ[response] || !StringQ[response],
 			Return[If[type === "Input", $Failed, ""]];
 		];
 		
 		If[type === "Input",
-			ToExpression[response, InputForm, $Failed],
+			Quiet[ToExpression[response, InputForm, Identity]],
 			response
 		]
 	];
