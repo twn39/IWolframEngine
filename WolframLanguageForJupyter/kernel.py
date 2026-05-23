@@ -2,9 +2,51 @@ import os
 import re
 import sys
 import json
+import asyncio
+import socket
+import threading
+from concurrent.futures import Future
 from ipykernel.kernelbase import Kernel
 from wolframclient.evaluation import WolframLanguageSession
 from wolframclient.language.expression import WLFunction, WLSymbol
+
+class StdinServer(threading.Thread):
+    def __init__(self, kernel):
+        super().__init__()
+        self.kernel = kernel
+        self.daemon = True
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.bind(('127.0.0.1', 0))
+        self.port = self.server_socket.getsockname()[1]
+        self.server_socket.listen(5)
+        
+    def run(self):
+        while True:
+            try:
+                conn, addr = self.server_socket.accept()
+                req_data = conn.recv(4096).decode('utf-8')
+                if not req_data:
+                    conn.close()
+                    continue
+                
+                try:
+                    req = json.loads(req_data)
+                    prompt = req.get("prompt", "")
+                except Exception:
+                    prompt = req_data
+                
+                user_input = self.kernel.request_stdin_from_frontend(prompt)
+                
+                conn.sendall(user_input.encode('utf-8'))
+                conn.close()
+            except Exception as e:
+                break
+                
+    def close(self):
+        try:
+            self.server_socket.close()
+        except Exception:
+            pass
 
 def clean_wolfram_boxes(text):
     text = re.sub(r'[\uf7c0-\uf7c9]', '', text)
@@ -204,7 +246,29 @@ class WolframLanguageKernel(Kernel):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.wl_session = None
+        self.main_loop = asyncio.get_event_loop()
+        self.stdin_server = StdinServer(self)
+        self.stdin_server.start()
         self.start_wolfram_session()
+
+    def request_stdin_from_frontend(self, prompt):
+        if not getattr(self, "_allow_stdin", False):
+            return "$Failed"
+            
+        future = Future()
+        
+        def run_in_main_thread():
+            try:
+                res = self.raw_input(prompt)
+                future.set_result(res)
+            except Exception as e:
+                future.set_exception(e)
+                
+        self.main_loop.call_soon_threadsafe(run_in_main_thread)
+        try:
+            return future.result()
+        except Exception:
+            return "$Failed"
 
     def start_wolfram_session(self):
         kernel_path = find_wolfram_kernel()
@@ -215,6 +279,9 @@ class WolframLanguageKernel(Kernel):
         self.log.info(f"Starting Wolfram Language session with kernel: {kernel_path}")
         self.wl_session = WolframLanguageSession(kernel_path)
         self.wl_session.start()
+        
+        # Configure stdin TCP port in WL Private context
+        self.wl_session.evaluate(f"WolframLanguageForJupyter`Private`$stdinPort = {self.stdin_server.port};")
         
         try:
             ver = self.wl_session.evaluate('$Version')
@@ -248,7 +315,7 @@ class WolframLanguageKernel(Kernel):
         # Close the package context block in WL
         self.wl_session.evaluate('EndPackage[]')
 
-    def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
+    async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
         if not code.strip():
             return {
                 'status': 'ok',
@@ -257,9 +324,10 @@ class WolframLanguageKernel(Kernel):
                 'user_expressions': {},
             }
             
+        self._allow_stdin = allow_stdin
         try:
             func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"), code)
-            res = self.wl_session.evaluate(func)
+            res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
             
             if not isinstance(res, dict):
                 # Fallback in case evaluation returned something unexpected
@@ -477,6 +545,8 @@ class WolframLanguageKernel(Kernel):
         return {'status': 'ok', 'found': False, 'data': {}, 'metadata': {}}
 
     def do_shutdown(self, restart):
+        if hasattr(self, "stdin_server") and self.stdin_server:
+            self.stdin_server.close()
         if self.wl_session:
             try:
                 self.wl_session.terminate()

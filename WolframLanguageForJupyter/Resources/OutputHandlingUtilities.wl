@@ -437,26 +437,399 @@ If[
 			]
 		];
 
+	(* check if the expression represents a structured table *)
+	isTableQ[expr_] := MemberQ[{Dataset, TableForm, Grid}, Head[expr]];
+
+	(* sanitize text content for HTML output *)
+	escapeHTML[str_String] := StringReplace[str, {
+		"&" -> "&amp;",
+		"<" -> "&lt;",
+		">" -> "&gt;",
+		"\"" -> "&quot;",
+		"'" -> "&#x27;"
+	}];
+	escapeHTML[expr_] := escapeHTML[ToString[expr]];
+
+	(* format generic cell values dynamically *)
+	formatCell[expr_] := Which[
+		StringQ[expr],
+		escapeHTML[expr],
+		
+		IntegerQ[expr] || Head[expr] === Real,
+		ToString[expr],
+		
+		isMathExprQ[expr],
+		StringJoin["$", sanitizeLaTeX[toText[TeXForm[expr], Infinity]], "$"],
+		
+		graphicsQ[expr],
+		toHTML[expr],
+		
+		isTableQ[expr],
+		toHTMLTable[expr],
+		
+		True,
+		escapeHTML[toText[expr]]
+	];
+
+	(* format grid cells, leaving span control tokens untouched *)
+	formatGridCell[expr_] := If[
+		MemberQ[{SpanFromLeft, SpanFromAbove, SpanFromBoth}, expr],
+		expr,
+		formatCell[expr]
+	];
+
+	(* beautify and wrap raw HTML tables with scrolling container and styles *)
+	beautifyHTMLTable[html_String] := StringJoin[
+		"<div class=\"wolfram-table-container\"><style>",
+		"
+.wolfram-table-container { overflow-x: auto; margin: 12px 0; }
+table.wolfram-table { border-collapse: collapse; font-family: var(--jp-content-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif); font-size: var(--jp-content-font-size1, 14px); color: var(--jp-content-font-color1, black); border: 1px solid var(--jp-border-color1, #dcdcdc); text-align: left; min-width: 200px; background-color: var(--jp-layout-color1, #ffffff); box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-radius: 4px; }
+table.wolfram-table th { background-color: var(--jp-layout-color2, #f5f5f5); color: var(--jp-content-font-color1, black); font-weight: 600; padding: 8px 12px; border: 1px solid var(--jp-border-color1, #dcdcdc); font-size: calc(var(--jp-content-font-size1, 14px) - 1px); }
+table.wolfram-table td { padding: 8px 12px; border: 1px solid var(--jp-border-color2, #e0e0e0); vertical-align: middle; }
+table.wolfram-table tbody tr:nth-child(even) { background-color: var(--jp-layout-color2, #fafafa); }
+table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #f0f0f0); }
+",
+		"</style>",
+		If[
+			StringContainsQ[html, "class=\"wolfram-table\""],
+			html,
+			StringReplace[html, {
+				"<table class=\"grid\">" -> "<table class=\"wolfram-table\">",
+				"<table>" -> "<table class=\"wolfram-table\">"
+			}]
+		],
+		"</div>"
+	];
+
+	(* pagination parameters for large tables *)
+	$maxRowsToDisplay = 60;
+	$headRowsToDisplay = 30;
+	$tailRowsToDisplay = 30;
+
+	(* format small muted metadata footer showing dimensions *)
+	formatDimensionFooter[summary_String] := StringJoin[
+		"<div style=\"font-size: 11px; color: var(--jp-ui-font-color3, #888888); margin-top: 4px; font-family: var(--jp-content-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif);\">",
+		"[", summary, "]",
+		"</div>"
+	];
+
+	(* table serializers for Dataset, TableForm, and Grid *)
+	toHTMLTable[expr_Dataset] := Module[
+		{data, html},
+		data = Normal[expr];
+		html = Which[
+			ListQ[data] && Length[data] > 0 && AllTrue[data, AssociationQ],
+			Module[{headers, tableHtml, row, val, numCols, isTruncated, headRows, tailRows},
+				headers = DeleteDuplicates[Flatten[Keys /@ data]];
+				numCols = Length[headers] + 1;
+				isTruncated = Length[data] > $maxRowsToDisplay;
+				
+				tableHtml = "<table class=\"wolfram-table\"><thead><tr><th></th>";
+				Do[
+					tableHtml = tableHtml <> "<th>" <> formatCell[h] <> "</th>",
+					{h, headers}
+				];
+				tableHtml = tableHtml <> "</tr></thead><tbody>";
+				
+				If[isTruncated,
+					headRows = Take[data, $headRowsToDisplay];
+					tailRows = Take[data, -$tailRowsToDisplay];
+					
+					Do[
+						row = headRows[[i]];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5); text-align: right; width: 30px;\">" <> ToString[i] <> "</td>";
+						Do[
+							val = Lookup[row, key, ""];
+							tableHtml = tableHtml <> "<td>" <> formatCell[val] <> "</td>",
+							{key, headers}
+						];
+						tableHtml = tableHtml <> "</tr>",
+						{i, 1, Length[headRows]}
+					];
+					
+					tableHtml = tableHtml <> "<tr><td colspan=\"" <> ToString[numCols] <> "\" style=\"text-align: center; color: var(--jp-ui-font-color3, #888888); font-weight: bold; background-color: var(--jp-layout-color1, #ffffff);\">...</td></tr>";
+					
+					Do[
+						row = tailRows[[i]];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5); text-align: right; width: 30px;\">" <> ToString[Length[data] - Length[tailRows] + i] <> "</td>";
+						Do[
+							val = Lookup[row, key, ""];
+							tableHtml = tableHtml <> "<td>" <> formatCell[val] <> "</td>",
+							{key, headers}
+						];
+						tableHtml = tableHtml <> "</tr>",
+						{i, 1, Length[tailRows]}
+					];
+					,
+					Do[
+						row = data[[i]];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5); text-align: right; width: 30px;\">" <> ToString[i] <> "</td>";
+						Do[
+							val = Lookup[row, key, ""];
+							tableHtml = tableHtml <> "<td>" <> formatCell[val] <> "</td>",
+							{key, headers}
+						];
+						tableHtml = tableHtml <> "</tr>",
+						{i, 1, Length[data]}
+					];
+				];
+				
+				tableHtml = tableHtml <> "</tbody></table>";
+				tableHtml = tableHtml <> formatDimensionFooter[ToString[Length[data]] <> " rows x " <> ToString[Length[headers]] <> " columns"];
+				tableHtml
+			],
+			
+			AssociationQ[data],
+			Module[{tableHtml, key, val, keys, isTruncated, headKeys, tailKeys},
+				keys = Keys[data];
+				isTruncated = Length[keys] > $maxRowsToDisplay;
+				tableHtml = "<table class=\"wolfram-table\"><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>";
+				
+				If[isTruncated,
+					headKeys = Take[keys, $headRowsToDisplay];
+					tailKeys = Take[keys, -$tailRowsToDisplay];
+					
+					Do[
+						key = headKeys[[i]];
+						val = data[key];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5);\">" <> formatCell[key] <> "</td><td>" <> formatCell[val] <> "</td></tr>",
+						{i, 1, Length[headKeys]}
+					];
+					
+					tableHtml = tableHtml <> "<tr><td colspan=\"2\" style=\"text-align: center; color: var(--jp-ui-font-color3, #888888); font-weight: bold; background-color: var(--jp-layout-color1, #ffffff);\">...</td></tr>";
+					
+					Do[
+						key = tailKeys[[i]];
+						val = data[key];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5);\">" <> formatCell[key] <> "</td><td>" <> formatCell[val] <> "</td></tr>",
+						{i, 1, Length[tailKeys]}
+					];
+					,
+					Do[
+						key = keys[[i]];
+						val = data[key];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5);\">" <> formatCell[key] <> "</td><td>" <> formatCell[val] <> "</td></tr>",
+						{i, 1, Length[keys]}
+					];
+				];
+				
+				tableHtml = tableHtml <> "</tbody></table>";
+				tableHtml = tableHtml <> formatDimensionFooter[ToString[Length[keys]] <> " keys"];
+				tableHtml
+			],
+			
+			ListQ[data] && Length[data] > 0 && AllTrue[data, ListQ],
+			toHTMLTable[Grid[data]],
+			
+			ListQ[data],
+			Module[{tableHtml, val, isTruncated, headData, tailData},
+				isTruncated = Length[data] > $maxRowsToDisplay;
+				tableHtml = "<table class=\"wolfram-table\"><thead><tr><th></th><th>Value</th></tr></thead><tbody>";
+				
+				If[isTruncated,
+					headData = Take[data, $headRowsToDisplay];
+					tailData = Take[data, -$tailRowsToDisplay];
+					
+					Do[
+						val = headData[[i]];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5); text-align: right; width: 30px;\">" <> ToString[i] <> "</td><td>" <> formatCell[val] <> "</td></tr>",
+						{i, 1, Length[headData]}
+					];
+					
+					tableHtml = tableHtml <> "<tr><td colspan=\"2\" style=\"text-align: center; color: var(--jp-ui-font-color3, #888888); font-weight: bold; background-color: var(--jp-layout-color1, #ffffff);\">...</td></tr>";
+					
+					Do[
+						val = tailData[[i]];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5); text-align: right; width: 30px;\">" <> ToString[Length[data] - Length[tailData] + i] <> "</td><td>" <> formatCell[val] <> "</td></tr>",
+						{i, 1, Length[tailData]}
+					];
+					,
+					Do[
+						val = data[[i]];
+						tableHtml = tableHtml <> "<tr><td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5); text-align: right; width: 30px;\">" <> ToString[i] <> "</td><td>" <> formatCell[val] <> "</td></tr>",
+						{i, 1, Length[data]}
+					];
+				];
+				
+				tableHtml = tableHtml <> "</tbody></table>";
+				tableHtml = tableHtml <> formatDimensionFooter[ToString[Length[data]] <> " items"];
+				tableHtml
+			],
+			
+			True,
+			"<table class=\"wolfram-table\"><tr><td>" <> formatCell[data] <> "</td></tr></table>"
+		];
+		Return[beautifyHTMLTable[html]];
+	];
+
+	toHTMLTable[expr : TableForm[data_, opts___]] := Module[
+		{listData, headings, rowH, colH, numRows, numCols, rowHeaders, colHeaders, hasRowH, hasColH, html, row, val,
+		 isTruncated, headData, tailData, headRowHeaders, tailRowHeaders, tableCols},
+		listData = If[ListQ[data], data, {data}];
+		headings = Lookup[Association[opts], TableHeadings, None];
+		
+		rowH = None;
+		colH = None;
+		If[MatchQ[headings, {_, _}],
+			rowH = headings[[1]];
+			colH = headings[[2]];
+		];
+		
+		numRows = Length[listData];
+		numCols = If[numRows > 0 && AllTrue[listData, ListQ], Max[Length /@ listData], 1];
+		
+		rowHeaders = Which[
+			ListQ[rowH] && Length[rowH] == numRows, rowH,
+			rowH === Automatic, Range[numRows],
+			True, {}
+		];
+		
+		colHeaders = Which[
+			ListQ[colH] && Length[colH] == numCols, colH,
+			colH === Automatic, Range[numCols],
+			True, {}
+		];
+		
+		hasRowH = Length[rowHeaders] > 0;
+		hasColH = Length[colHeaders] > 0;
+		tableCols = numCols + If[hasRowH, 1, 0];
+		isTruncated = numRows > $maxRowsToDisplay;
+		
+		html = "<table class=\"wolfram-table\">";
+		
+		If[hasColH,
+			html = html <> "<thead><tr>";
+			If[hasRowH, html = html <> "<th></th>"];
+			Do[
+				html = html <> "<th>" <> formatCell[c] <> "</th>",
+				{c, colHeaders}
+			];
+			html = html <> "</tr></thead>";
+		];
+		
+		html = html <> "<tbody>";
+		
+		If[isTruncated,
+			headData = Take[listData, $headRowsToDisplay];
+			tailData = Take[listData, -$tailRowsToDisplay];
+			headRowHeaders = If[hasRowH, Take[rowHeaders, $headRowsToDisplay], {}];
+			tailRowHeaders = If[hasRowH, Take[rowHeaders, -$tailRowsToDisplay], {}];
+			
+			Do[
+				row = headData[[i]];
+				html = html <> "<tr>";
+				If[hasRowH,
+					html = html <> "<td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5);\">" <> formatCell[headRowHeaders[[i]]] <> "</td>"
+				];
+				If[ListQ[row],
+					Do[
+						val = If[j <= Length[row], row[[j]], ""];
+						html = html <> "<td>" <> formatCell[val] <> "</td>",
+						{j, 1, numCols}
+					],
+					html = html <> "<td>" <> formatCell[row] <> "</td>"
+				];
+				html = html <> "</tr>",
+				{i, 1, Length[headData]}
+			];
+			
+			html = html <> "<tr><td colspan=\"" <> ToString[tableCols] <> "\" style=\"text-align: center; color: var(--jp-ui-font-color3, #888888); font-weight: bold; background-color: var(--jp-layout-color1, #ffffff);\">...</td></tr>";
+			
+			Do[
+				row = tailData[[i]];
+				html = html <> "<tr>";
+				If[hasRowH,
+					html = html <> "<td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5);\">" <> formatCell[tailRowHeaders[[i]]] <> "</td>"
+				];
+				If[ListQ[row],
+					Do[
+						val = If[j <= Length[row], row[[j]], ""];
+						html = html <> "<td>" <> formatCell[val] <> "</td>",
+						{j, 1, numCols}
+					],
+					html = html <> "<td>" <> formatCell[row] <> "</td>"
+				];
+				html = html <> "</tr>",
+				{i, 1, Length[tailData]}
+			];
+			,
+			Do[
+				row = listData[[i]];
+				html = html <> "<tr>";
+				If[hasRowH,
+					html = html <> "<td style=\"font-weight: bold; background-color: var(--jp-layout-color2, #f5f5f5);\">" <> formatCell[rowHeaders[[i]]] <> "</td>"
+				];
+				If[ListQ[row],
+					Do[
+						val = If[j <= Length[row], row[[j]], ""];
+						html = html <> "<td>" <> formatCell[val] <> "</td>",
+						{j, 1, numCols}
+					],
+					html = html <> "<td>" <> formatCell[row] <> "</td>"
+				];
+				html = html <> "</tr>",
+				{i, 1, numRows}
+			];
+		];
+		
+		html = html <> "</tbody></table>";
+		html = html <> formatDimensionFooter[ToString[numRows] <> " rows x " <> ToString[numCols] <> " columns"];
+		Return[beautifyHTMLTable[html]];
+	];
+
+	toHTMLTable[expr : Grid[data_List, opts___]] := Module[
+		{numRows, numCols, isTruncated, headRows, tailRows, spacerRow, truncatedData, formattedData, formattedGrid, htmlFragment},
+		numRows = Length[data];
+		numCols = If[numRows > 0, Length[First[data]], 0];
+		isTruncated = numRows > $maxRowsToDisplay;
+		
+		If[isTruncated,
+			headRows = Take[data, $headRowsToDisplay];
+			tailRows = Take[data, -$tailRowsToDisplay];
+			spacerRow = If[numCols > 0, Join[{"..."}, Table[SpanFromLeft, numCols - 1]], {"..."}];
+			truncatedData = Join[headRows, {spacerRow}, tailRows];
+			,
+			truncatedData = data;
+		];
+		
+		formattedData = Map[formatGridCell, truncatedData, {2}];
+		formattedGrid = Grid[formattedData, opts];
+		htmlFragment = Quiet[ExportString[formattedGrid, "HTMLFragment"]];
+		If[FailureQ[htmlFragment] || !StringQ[htmlFragment],
+			Return[$Failed];
+		];
+		
+		htmlFragment = htmlFragment <> formatDimensionFooter[ToString[numRows] <> " rows x " <> ToString[numCols] <> " columns"];
+		Return[beautifyHTMLTable[htmlFragment]];
+	];
+
+	toHTMLTable[expr_] := $Failed;
+
 	(* generate HTML representation for any expression (including text and graphics) *)
 	toHTML[expr_] :=
-		If[
-			textQ[expr] || isMathExprQ[expr] || Head[expr] === TeXForm || $outputSetToTeXForm,
-			If[((Head[expr] === TeXForm) || ($outputSetToTeXForm) || isMathExprQ[expr]),
-				Module[
-					{latexText},
-					latexText = toText[If[Head[expr] === TeXForm, expr, TeXForm[expr]], Infinity];
-					latexText = sanitizeLaTeX[latexText];
-					StringJoin["<div style=\"text-align: left;\"><style>mjx-container[display=\"true\"] { align-items: flex-start !important; text-align: left !important; } .MathJax_Display { text-align: left !important; }</style>$$", latexText, "$$</div>"]
-				],
-				toOutTextHTML[expr]
+		If[isTableQ[expr],
+			Module[{htmlTable = toHTMLTable[expr]},
+				If[StringQ[htmlTable], htmlTable, toHTML[Shallow[expr]]]
 			],
-			Module[
-				{svgStr},
-				svgStr = toSVGString[$trueFormatType[expr]];
-				If[
-					StringQ[svgStr],
-					svgStr,
-					toOutImageHTML[expr]
+			If[
+				textQ[expr] || isMathExprQ[expr] || Head[expr] === TeXForm || $outputSetToTeXForm,
+				If[((Head[expr] === TeXForm) || ($outputSetToTeXForm) || isMathExprQ[expr]),
+					Module[
+						{latexText},
+						latexText = toText[If[Head[expr] === TeXForm, expr, TeXForm[expr]], Infinity];
+						latexText = sanitizeLaTeX[latexText];
+						StringJoin["<div style=\"text-align: left;\"><style>mjx-container[display=\"true\"] { align-items: flex-start !important; text-align: left !important; } .MathJax_Display { text-align: left !important; }</style>$$", latexText, "$$</div>"]
+					],
+					toOutTextHTML[expr]
+				],
+				Module[
+					{svgStr},
+					svgStr = toSVGString[$trueFormatType[expr]];
+					If[
+						StringQ[svgStr],
+						svgStr,
+						toOutImageHTML[expr]
+					]
 				]
 			]
 		];
@@ -485,6 +858,30 @@ If[
 				(* accumulated MIME data and metadata dicts *)
 				mimeData, mimeMeta
 			},
+
+			(* --- Table/Grid Path: Intercept early to generate beautiful HTML tables --- *)
+			If[isTableQ[expr],
+				Module[
+					{
+						htmlTable,
+						dataAssoc
+					},
+					plainText = toText[expr];
+					htmlTable = toHTMLTable[expr];
+					If[StringQ[htmlTable],
+						dataAssoc = Association[
+							"text/plain" -> plainText,
+							"text/html" -> htmlTable
+						];
+						Return[
+							Association[
+								"data" -> dataAssoc,
+								"metadata" -> Association[]
+							]
+						];
+					];
+				];
+			];
 
 			processedExpr = $trueFormatType[expr];
 
@@ -587,6 +984,48 @@ If[
 
 			Return[Association["data" -> mimeData, "metadata" -> mimeMeta]];
 		];
+
+	(* helper for TCP-based stdin requests *)
+	getStdinFromSocket[prompt_String, type_String] := Module[
+		{socket, req, response},
+		If[!IntegerQ[WolframLanguageForJupyter`Private`$stdinPort] || WolframLanguageForJupyter`Private`$stdinPort <= 0,
+			Return[If[type === "Input", $Failed, ""]];
+		];
+		
+		(* Connect to the Python stdin server *)
+		socket = Quiet[SocketConnect[{"127.0.0.1", WolframLanguageForJupyter`Private`$stdinPort}]];
+		If[FailureQ[socket],
+			Return[If[type === "Input", $Failed, ""]];
+		];
+		
+		(* Send request *)
+		req = ExportString[Association["prompt" -> prompt, "type" -> type], "JSON", "Compact" -> True];
+		SocketWrite[socket, req];
+		
+		(* Read reply *)
+		response = SocketReadMessage[socket];
+		Close[socket];
+		
+		If[Head[response] === ByteArray,
+			response = ByteArrayToString[response]
+		];
+		
+		If[FailureQ[response] || !StringQ[response],
+			Return[If[type === "Input", $Failed, ""]];
+		];
+		
+		If[type === "Input",
+			ToExpression[response, InputForm, $Failed],
+			response
+		]
+	];
+	getStdinFromSocket[prompt_, type_String] := getStdinFromSocket[ToString[prompt], type];
+
+	(* Redefine Input and InputString to route via socket *)
+	Unprotect[Input, InputString];
+	Input[prompt_ : ""] := getStdinFromSocket[prompt, "Input"];
+	InputString[prompt_ : ""] := getStdinFromSocket[prompt, "InputString"];
+	Protect[Input, InputString];
 
 	(* end the private context for WolframLanguageForJupyter *)
 	End[]; (* `Private` *)
