@@ -1023,6 +1023,9 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 
 	(* Redefine Input and InputString to route via socket *)
 	Unprotect[Input, InputString];
+	ClearAttributes[{Input, InputString}, ReadProtected];
+	DownValues[Input] = {};
+	DownValues[InputString] = {};
 	Input[prompt_ : ""] := getStdinFromSocket[prompt, "Input"];
 	InputString[prompt_ : ""] := getStdinFromSocket[prompt, "InputString"];
 	Protect[Input, InputString];
