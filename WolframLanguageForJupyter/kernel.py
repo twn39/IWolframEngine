@@ -249,6 +249,15 @@ class WolframLanguageKernel(Kernel):
         if not getattr(self, "log", None):
             import logging
             self.log = logging.getLogger("WolframLanguageKernel")
+            
+        # Initialize comms infrastructure for widgets support
+        import comm
+        import ipykernel.ipkernel
+        self.comm_manager = comm.get_comm_manager()
+        comm_msg_types = ["comm_open", "comm_msg", "comm_close"]
+        for msg_type in comm_msg_types:
+            self.shell_handlers[msg_type] = getattr(self.comm_manager, msg_type)
+
         self.wl_session = None
         self.main_loop = asyncio.get_event_loop()
         self.stdin_server = StdinServer(self)
