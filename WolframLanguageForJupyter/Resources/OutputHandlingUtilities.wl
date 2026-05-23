@@ -1002,6 +1002,9 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 		req = ExportString[Association["prompt" -> prompt, "type" -> type], "JSON", "Compact" -> True];
 		WriteString[socket, req];
 		
+		(* Block waiting for reply data *)
+		SocketWaitNext[{socket}];
+		
 		(* Read reply *)
 		response = ReadString[socket];
 		Close[socket];
