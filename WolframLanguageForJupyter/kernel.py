@@ -10,7 +10,7 @@ def clean_wolfram_boxes(text):
     text = re.sub(r'[\uf7c0-\uf7c9]', '', text)
     text = re.sub(r'[\uf3c0-\uf3c9]', '', text)
     
-    token_pattern = re.compile(r'\"(?:[^\"\\]|\\.)*\"|[a-zA-Z]+Box|[\[\]\{\}\,]|[^\"a-zA-Z\[\]\{\}\,]+')
+    token_pattern = re.compile(r'\"(?:[^\"\\]|\\.)*\"|[a-zA-Z]+|[\[\]\{\}\,]|[^\"a-zA-Z\[\]\{\}\,]+')
     tokens = token_pattern.findall(text)
     
     def parse_expr(tokens, idx):
@@ -20,7 +20,7 @@ def clean_wolfram_boxes(text):
         if token.startswith('"'):
             val = token[1:-1].replace('\\"', '"')
             return val, idx + 1
-        elif token in ('RowBox', 'StyleBox', 'SubscriptBox', 'SuperscriptBox', 'FractionBox', 'OverscriptBox', 'UnderscriptBox'):
+        elif token in ('RowBox', 'StyleBox', 'SubscriptBox', 'SuperscriptBox', 'FractionBox', 'OverscriptBox', 'UnderscriptBox', 'DisplayForm'):
             if idx + 1 < len(tokens) and tokens[idx + 1] == '[':
                 args = []
                 curr = idx + 2
@@ -28,15 +28,20 @@ def clean_wolfram_boxes(text):
                     if tokens[curr] == '{':
                         list_items = []
                         curr += 1
+                        first = True
                         while curr < len(tokens) and tokens[curr] != '}':
-                            if tokens[curr] == ',':
-                                curr += 1
-                                continue
-                            if tokens[curr].isspace():
-                                curr += 1
-                                continue
-                            item, curr = parse_expr(tokens, curr)
-                            list_items.append(item)
+                            if not first:
+                                if tokens[curr] == ',':
+                                    curr += 1
+                                elif tokens[curr].isspace():
+                                    curr += 1
+                                    continue
+                            else:
+                                first = False
+                            
+                            if curr < len(tokens) and tokens[curr] != '}':
+                                item, curr = parse_expr(tokens, curr)
+                                list_items.append(item)
                         if curr < len(tokens):
                             curr += 1  # consume }
                         args.append("".join(list_items))
@@ -58,11 +63,94 @@ def clean_wolfram_boxes(text):
                     return f"{args[0]}^{args[1]}", curr
                 elif token == 'FractionBox' and len(args) >= 2:
                     return f"({args[0]})/({args[1]})", curr
+                elif token == 'DisplayForm' and len(args) >= 1:
+                    return args[0], curr
                 else:
                     return "".join(args), curr
             return token, idx + 1
         elif token in ('[', ']', '{', '}', ','):
-            return "", idx + 1
+            return token, idx + 1
+        else:
+            return token, idx + 1
+
+    result = []
+    idx = 0
+    while idx < len(tokens):
+        if tokens[idx].isspace():
+            result.append(tokens[idx])
+            idx += 1
+        else:
+            item, idx = parse_expr(tokens, idx)
+            result.append(item)
+        
+    return "".join(result)
+
+def format_wolfram_boxes_html(text):
+    text = re.sub(r'[\uf7c0-\uf7c9]', '', text)
+    text = re.sub(r'[\uf3c0-\uf3c9]', '', text)
+    
+    token_pattern = re.compile(r'\"(?:[^\"\\]|\\.)*\"|[a-zA-Z]+|[\[\]\{\}\,]|[^\"a-zA-Z\[\]\{\}\,]+')
+    tokens = token_pattern.findall(text)
+    
+    def parse_expr(tokens, idx):
+        if idx >= len(tokens):
+            return "", idx
+        token = tokens[idx]
+        if token.startswith('"'):
+            val = token[1:-1].replace('\\"', '"')
+            return val, idx + 1
+        elif token in ('RowBox', 'StyleBox', 'SubscriptBox', 'SuperscriptBox', 'FractionBox', 'OverscriptBox', 'UnderscriptBox', 'DisplayForm'):
+            if idx + 1 < len(tokens) and tokens[idx + 1] == '[':
+                args = []
+                curr = idx + 2
+                while curr < len(tokens) and tokens[curr] != ']':
+                    if tokens[curr] == '{':
+                        list_items = []
+                        curr += 1
+                        first = True
+                        while curr < len(tokens) and tokens[curr] != '}':
+                            if not first:
+                                if tokens[curr] == ',':
+                                    curr += 1
+                                elif tokens[curr].isspace():
+                                    curr += 1
+                                    continue
+                            else:
+                                first = False
+                            
+                            if curr < len(tokens) and tokens[curr] != '}':
+                                item, curr = parse_expr(tokens, curr)
+                                list_items.append(item)
+                        if curr < len(tokens):
+                            curr += 1  # consume }
+                        args.append("".join(list_items))
+                    elif tokens[curr] == ',':
+                        curr += 1
+                    elif tokens[curr].isspace():
+                        curr += 1
+                    else:
+                        arg, curr = parse_expr(tokens, curr)
+                        args.append(arg)
+                if curr < len(tokens):
+                    curr += 1  # consume ]
+                
+                if token == 'StyleBox' and len(args) >= 1:
+                    if len(args) >= 2 and 'TI' in args[1]:
+                        return f"<i>{args[0]}</i>", curr
+                    return args[0], curr
+                elif token == 'SubscriptBox' and len(args) >= 2:
+                    return f"{args[0]}<sub>{args[1]}</sub>", curr
+                elif token == 'SuperscriptBox' and len(args) >= 2:
+                    return f"{args[0]}<sup>{args[1]}</sup>", curr
+                elif token == 'FractionBox' and len(args) >= 2:
+                    return f'<span style="display:inline-block; vertical-align:middle; text-align:center;"><span style="display:block; border-bottom:1px solid; padding:0 2px;">{args[0]}</span><span style="display:block; padding:0 2px;">{args[1]}</span></span>', curr
+                elif token == 'DisplayForm' and len(args) >= 1:
+                    return args[0], curr
+                else:
+                    return "".join(args), curr
+            return token, idx + 1
+        elif token in ('[', ']', '{', '}', ','):
+            return token, idx + 1
         else:
             return token, idx + 1
 
@@ -261,7 +349,7 @@ class WolframLanguageKernel(Kernel):
             'metadata': {}
         }
 
-    def do_inspect(self, code, cursor_pos, detail_level=0):
+    def do_inspect(self, code, cursor_pos, detail_level=0, *args, **kwargs):
         pattern = re.compile(r'[a-zA-Z\$`][a-zA-Z0-9\$`]*')
         symbol = None
         for match in pattern.finditer(code):
@@ -273,19 +361,113 @@ class WolframLanguageKernel(Kernel):
             return {'status': 'ok', 'found': False, 'data': {}, 'metadata': {}}
             
         try:
-            msg_expr = WLFunction(WLSymbol("MessageName"), WLFunction(WLSymbol("Symbol"), symbol), "usage")
-            usage = self.wl_session.evaluate(msg_expr)
+            # Query structured symbol documentation via a single evaluation block
+            wl_code = f"""
+            Module[{{sym, usage, doc, options, docLink}},
+                If[!NameQ["{symbol}"] && !NameQ["System`{symbol}"],
+                    Return[Association["found" -> False]]
+                ];
+                sym = Symbol[If[NameQ["{symbol}"], "{symbol}", "System`{symbol}"]];
+                options = Information[sym, "Options"];
+                If[FailureQ[options], options = None];
+                doc = Information[sym, "Documentation"];
+                docLink = If[AssociationQ[doc], Lookup[doc, "Web", ""], ""];
+                usage = Information[sym, "Usage"];
+                If[FailureQ[usage] || !StringQ[ToString[usage]], usage = ""];
+                If[StringQ[usage] && usage =!= "", usage = ToString[InputForm[usage]]];
+                Association[
+                    "found" -> True,
+                    "usage" -> usage,
+                    "docLink" -> ToString[docLink],
+                    "options" -> ToString[InputForm[options]]
+                ]
+            ]
+            """
+            res = self.wl_session.evaluate(wl_code)
             
-            if usage and isinstance(usage, str):
-                if usage.endswith("::usage") or usage == "$Failed":
-                    return {'status': 'ok', 'found': False, 'data': {}, 'metadata': {}}
+            if isinstance(res, dict) and res.get("found"):
+                raw_usage = res.get("usage", "")
+                doc_link = res.get("docLink", "")
+                options_str = res.get("options", "")
                 
-                cleaned_usage = clean_wolfram_boxes(usage)
+                # Check for empty usage fallback
+                if not raw_usage:
+                    try:
+                        fallback_expr = WLFunction(
+                            WLSymbol("ToString"),
+                            WLFunction(
+                                WLSymbol("InputForm"),
+                                WLFunction(
+                                    WLSymbol("MessageName"),
+                                    WLFunction(WLSymbol("Evaluate"), WLFunction(WLSymbol("Symbol"), symbol)),
+                                    "usage"
+                                )
+                            )
+                        )
+                        fallback_usage = self.wl_session.evaluate(fallback_expr)
+                        if isinstance(fallback_usage, str) and not fallback_usage.endswith("::usage") and fallback_usage != "$Failed":
+                            raw_usage = fallback_usage
+                    except Exception:
+                        pass
+
+                if not raw_usage:
+                    raw_usage = f"Symbol: {symbol}"
+
+                # Parse and clean box structures
+                # Strip outer quotes if they exist (since InputForm wraps the string in quotes)
+                if raw_usage.startswith('"') and raw_usage.endswith('"'):
+                    raw_usage = raw_usage[1:-1]
+                # Unescape backslashes and newlines
+                raw_usage = raw_usage.replace('\\\\', '\\').replace('\\n', '\n')
+                # Convert Wolfram string box brackets to DisplayForm / brackets, and unescape quotes
+                processed_usage = raw_usage.replace(r"\!\(\*", "DisplayForm[").replace(r"\)", "]").replace(r'\"', '"')
+                cleaned_usage = clean_wolfram_boxes(processed_usage)
+                html_usage = format_wolfram_boxes_html(processed_usage)
+                
+                # Create HTML layout styled for Jupyter Lab (light/dark theme variables)
+                html = f"""<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; color: var(--jp-content-font-color1, #333); max-width: 600px;">
+    <h3 style="margin-top: 0; margin-bottom: 8px; font-size: 15px; font-weight: bold; border-bottom: 1px solid var(--jp-border-color1, #e0e0e0); padding-bottom: 4px;">
+        <span style="color: #d9534f;">{symbol}</span>
+    </h3>
+    <div style="margin-bottom: 12px; white-space: pre-wrap;">{html_usage}</div>
+"""
+                if options_str and options_str != "None" and options_str != "Null":
+                    opts = options_str.strip()
+                    if opts.startswith("{") and opts.endswith("}"):
+                        opts = opts[1:-1]
+                    html += f"""
+    <div style="margin-bottom: 12px;">
+        <strong style="color: var(--jp-content-font-color2, #666); font-size: 12px;">Options:</strong>
+        <pre style="margin: 4px 0 0 0; padding: 6px; background-color: var(--jp-layout-color2, #f5f5f5); border: 1px solid var(--jp-border-color2, #e0e0e0); border-radius: 4px; font-family: monospace; font-size: 11px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word;">{opts}</pre>
+    </div>
+"""
+                if doc_link:
+                    html += f"""
+    <div style="text-align: right; font-size: 11px; margin-top: 8px;">
+        <a href="{doc_link}" target="_blank" style="color: #0275d8; text-decoration: none; font-weight: 500;">
+            Online Reference &#x2197;
+        </a>
+    </div>
+"""
+                html += "</div>"
+                
+                # Create Markdown layout
+                markdown = f"### `{symbol}`\n\n{cleaned_usage}\n\n"
+                if options_str and options_str != "None" and options_str != "Null":
+                    opts = options_str.strip()
+                    if opts.startswith("{") and opts.endswith("}"):
+                        opts = opts[1:-1]
+                    markdown += f"**Options:**\n```wolfram\n{opts}\n```\n\n"
+                if doc_link:
+                    markdown += f"[Online Reference]({doc_link})\n"
+                
                 return {
                     'status': 'ok',
                     'found': True,
                     'data': {
-                        'text/plain': cleaned_usage
+                        'text/plain': cleaned_usage,
+                        'text/markdown': markdown,
+                        'text/html': html
                     },
                     'metadata': {}
                 }

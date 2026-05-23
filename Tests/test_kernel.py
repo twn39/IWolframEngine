@@ -231,6 +231,24 @@ try:
     assert any(m['msg_type'] == 'execute_result' for m in iopub_msgs), "Expected execute_result for 1/0 warning"
     print("Normal Warning test passed!")
 
+    # Test Case 5: Rich Inspection
+    print("\n[TEST] Verifying Rich Inspection (inspect Plot)...")
+    inspect_msg_id = kc.inspect('Plot', 2)
+    inspect_reply = get_reply_for_msg_id(kc, inspect_msg_id)
+    print(f"Inspect Reply: {inspect_reply['content']}")
+    assert inspect_reply['content']['status'] == 'ok', "Inspect status not ok"
+    assert inspect_reply['content']['found'] == True, "Expected symbol 'Plot' to be found"
+    data = inspect_reply['content']['data']
+    assert "text/plain" in data, "Missing text/plain in inspect reply"
+    assert "text/html" in data, "Missing text/html in inspect reply"
+    assert "text/markdown" in data, "Missing text/markdown in inspect reply"
+    assert "Plot" in data["text/plain"], "Plain text inspect reply missing 'Plot'"
+    assert "Plot" in data["text/html"], "HTML inspect reply missing 'Plot'"
+    assert "Plot" in data["text/markdown"], "Markdown inspect reply missing 'Plot'"
+    assert "Options" in data["text/html"], "HTML inspect reply missing 'Options'"
+    assert "http://reference.wolfram.com/language/ref/Plot.html" in data["text/html"], "HTML inspect reply missing reference link"
+    print("Rich Inspection test passed!")
+
     print("\n--- RESULTS ---")
     stdout_str = ''.join(stdout).strip()
     print(f"Stdout output: {stdout_str}")
