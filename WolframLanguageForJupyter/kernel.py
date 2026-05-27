@@ -528,7 +528,9 @@ class WolframLanguageKernel(Kernel):
                         metadata_dict = mime.get("metadata", {})
                         
                         if "image/svg+xml" in data_dict:
-                            display_area.value = data_dict["image/svg+xml"]
+                            import uuid
+                            unique_id = str(uuid.uuid4().hex)[:8]
+                            display_area.value = data_dict["image/svg+xml"].replace("glyph", f"glyph_{unique_id}").replace("clip", f"clip_{unique_id}")
                         elif "image/png" in data_dict:
                             png_base64 = data_dict["image/png"]
                             png_meta = metadata_dict.get("image/png", {})
@@ -760,6 +762,13 @@ class WolframLanguageKernel(Kernel):
                 for i, bundle in enumerate(mime_bundles):
                     data = bundle.get("data", {})
                     metadata = bundle.get("metadata", {})
+                    
+                    # Prevent SVG ID collisions in browser rendering
+                    if "image/svg+xml" in data:
+                        import uuid
+                        unique_id = str(uuid.uuid4().hex)[:8]
+                        data = dict(data)
+                        data["image/svg+xml"] = data["image/svg+xml"].replace("glyph", f"glyph_{unique_id}").replace("clip", f"clip_{unique_id}")
                     
                     # Manipulate 控件处理（保持原有逻辑，每个 bundle 独立检查）
                     if "application/x-wolfram-manipulate" in data:
