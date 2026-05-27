@@ -1040,67 +1040,161 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 	Input[prompt_ : ""] := getStdinFromSocket[prompt, "Input"];
 	InputString[prompt_ : ""] := getStdinFromSocket[prompt, "InputString"];
 	parseVariableSpec[spec_] := Module[
-		{varName, initVal, minVal, maxVal, stepVal, choices, type, nameStr, evalVal},
+		{varName, initVal, minVal, maxVal, stepVal, choices, type, nameStr, evalVal,
+		 rules, coreSpec, controlTypeVal, controlTypesList, formatChoice, formattedChoices, args},
 		evalVal[val_] := Which[
 			IntegerQ[val] || Head[val] === Real, val,
 			NumericQ[val], N[val],
 			True, val
 		];
 		
-		If[ListQ[spec] && Length[spec] >= 2,
-			If[ListQ[spec[[1]]],
-				varName = spec[[1, 1]];
-				initVal = spec[[1, 2]];
+		If[ListQ[spec] && Length[spec] >= 1,
+			(* Split option rules and core specification *)
+			rules = Select[Rest[spec], OptionQ];
+			coreSpec = Prepend[Select[Rest[spec], !OptionQ[#] &], First[spec]];
+			
+			(* Check ControlType override or trailing symbols *)
+			controlTypesList = {Slider, InputField, Checkbox, PopupMenu, RadioButton, SetterBar, Trigger, Locator, Dropdown};
+			controlTypeVal = Lookup[rules, ControlType, None];
+			If[controlTypeVal === None && Length[coreSpec] > 1 && MemberQ[controlTypesList, Last[coreSpec]],
+				controlTypeVal = Last[coreSpec];
+				coreSpec = Most[coreSpec];
+			];
+			
+			(* Extract variable name, initial value, and remaining args *)
+			If[ListQ[coreSpec[[1]]],
+				varName = coreSpec[[1, 1]];
+				If[Length[coreSpec[[1]]] >= 2,
+					initVal = coreSpec[[1, 2]];
+				,
+					initVal = None;
+				];
+				args = Rest[coreSpec];
 			,
-				varName = spec[[1]];
+				varName = coreSpec[[1]];
+				args = Rest[coreSpec];
 				initVal = None;
 			];
 			nameStr = ToString[varName];
 			
-			If[ListQ[spec[[2]]],
-				choices = spec[[2]];
-				If[Sort[choices] === {False, True},
-					type = "Checkbox";
-					If[initVal === None, initVal = False];
-					Return[Association[
-						"name" -> nameStr,
-						"type" -> type,
-						"initial" -> initVal,
-						"choices" -> choices
-					]];
+			(* Determine initVal if not specified in declaration *)
+			If[initVal === None,
+				If[controlTypeVal === Locator && Length[args] >= 1,
+					initVal = args[[1]];
+					args = Rest[args];
 				,
-					type = "Dropdown";
-					If[initVal === None, initVal = First[choices]];
-					Return[Association[
-						"name" -> nameStr,
-						"type" -> type,
-						"initial" -> ToString[initVal, InputForm],
-						"choices" -> (Association["label" -> ToString[#], "value" -> ToString[#, InputForm]] & /@ choices)
-					]];
+					If[controlTypeVal === InputField && Length[args] >= 1,
+						initVal = args[[1]];
+						args = Rest[args];
+					,
+						If[Length[args] == 1,
+							If[!ListQ[args[[1]]],
+								initVal = args[[1]];
+								args = Rest[args];
+							];
+						,
+							If[Length[args] >= 3,
+								initVal = args[[1]];
+								args = Rest[args];
+							];
+						];
+					];
 				];
 			];
 			
-			minVal = evalVal[spec[[2]]];
-			maxVal = evalVal[spec[[3]]];
-			If[Length[spec] >= 4,
-				stepVal = evalVal[spec[[4]]];
-			,
-				stepVal = None;
-			];
-			If[initVal === None, 
-				initVal = minVal;
-			,
-				initVal = evalVal[initVal];
+			(* 1. Checkbox *)
+			If[controlTypeVal === Checkbox || 
+			   (controlTypeVal === None && Length[args] == 1 && ListQ[args[[1]]] && Sort[args[[1]]] === {False, True}) ||
+			   (controlTypeVal === None && Length[args] == 0 && MemberQ[{True, False}, initVal]),
+				type = "Checkbox";
+				If[initVal === None || initVal === False, initVal = False, initVal = True];
+				Return[Association[
+					"name" -> nameStr,
+					"type" -> type,
+					"initial" -> initVal
+				]];
 			];
 			
-			Return[Association[
-				"name" -> nameStr,
-				"type" -> "Slider",
-				"initial" -> initVal,
-				"min" -> minVal,
-				"max" -> maxVal,
-				"step" -> stepVal
-			]];
+			(* 2. Dropdown / PopupMenu / RadioButton / SetterBar *)
+			If[MemberQ[{PopupMenu, RadioButton, SetterBar, Dropdown}, controlTypeVal] ||
+			   (controlTypeVal === None && Length[args] == 1 && ListQ[args[[1]]]),
+				type = Which[
+					controlTypeVal === PopupMenu, "PopupMenu",
+					controlTypeVal === RadioButton, "RadioButton",
+					controlTypeVal === SetterBar, "SetterBar",
+					True, "Dropdown"
+				];
+				
+				If[Length[args] >= 1 && ListQ[args[[1]]],
+					choices = args[[1]];
+				,
+					If[Length[args] >= 2,
+						minVal = evalVal[args[[1]]];
+						maxVal = evalVal[args[[2]]];
+						stepVal = If[Length[args] >= 3, evalVal[args[[3]]], 1];
+						choices = Range[minVal, maxVal, stepVal];
+					,
+						choices = {};
+					];
+				];
+				
+				If[initVal === None, 
+					initVal = If[Length[choices] > 0, First[choices], None];
+				];
+				formatChoice[val_ -> label_] := Association["label" -> ToString[label], "value" -> ToString[val, InputForm]];
+				formatChoice[val_] := Association["label" -> ToString[val], "value" -> ToString[val, InputForm]];
+				formattedChoices = formatChoice /@ choices;
+				
+				Return[Association[
+					"name" -> nameStr,
+					"type" -> type,
+					"initial" -> ToString[initVal, InputForm],
+					"choices" -> formattedChoices
+				]];
+			];
+			
+			(* 3. InputField *)
+			If[controlTypeVal === InputField || (controlTypeVal === None && Length[args] == 0 && !MemberQ[{True, False}, initVal] && !ListQ[initVal]),
+				type = "InputField";
+				If[initVal === None, initVal = ""];
+				Return[Association[
+					"name" -> nameStr,
+					"type" -> type,
+					"initial" -> ToString[initVal, InputForm]
+				]];
+			];
+			
+			(* 4. Locator *)
+			If[controlTypeVal === Locator || (controlTypeVal === None && Length[args] == 0 && ListQ[initVal] && Length[initVal] == 2),
+				type = "Locator";
+				If[initVal === None || !ListQ[initVal] || Length[initVal] != 2, initVal = {0.0, 0.0}];
+				Return[Association[
+					"name" -> nameStr,
+					"type" -> type,
+					"initial" -> initVal
+				]];
+			];
+			
+			(* 5. Slider / Trigger *)
+			If[controlTypeVal === Trigger || controlTypeVal === Slider || Length[args] >= 2,
+				type = If[controlTypeVal === Trigger, "Trigger", "Slider"];
+				minVal = If[Length[args] >= 1, evalVal[args[[1]]], 0.0];
+				maxVal = If[Length[args] >= 2, evalVal[args[[2]]], 1.0];
+				stepVal = If[Length[args] >= 3, evalVal[args[[3]]], None];
+				If[initVal === None,
+					initVal = minVal;
+				,
+					initVal = evalVal[initVal];
+				];
+				Return[Association[
+					"name" -> nameStr,
+					"type" -> type,
+					"initial" -> initVal,
+					"min" -> minVal,
+					"max" -> maxVal,
+					"step" -> stepVal
+				]];
+			];
 		];
 		$Failed
 	];
@@ -1117,7 +1211,7 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 	];
 
 	evaluateManipulate[exprStr_String, bindings_Association] := Module[
-		{heldExpr, rules, substituted, evalResult, mimeBundle, toVal},
+		{heldExpr, keys, vals, individualHolds, combinedHold, func, blockHeld, evalResult, mimeBundle, toVal},
 		
 		(* Redirect buffers *)
 		loopState["capturedStdout"] = {};
@@ -1139,10 +1233,25 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 		toVal[val_] := val;
 		
 		heldExpr = ToExpression[exprStr, InputForm];
-		rules = Symbol[#1] -> toVal[bindings[#1]] & /@ Keys[bindings];
-		substituted = ReplaceAll[heldExpr, rules];
 		
-		evalResult = Quiet[ReleaseHold[substituted]];
+		keys = Keys[bindings];
+		vals = toVal /@ Values[bindings];
+		
+		If[Length[keys] > 0,
+			individualHolds = Table[
+				With[{sym = Symbol[keys[[i]]], val = vals[[i]]},
+					Hold[sym = val]
+				],
+				{i, Length[keys]}
+			];
+			combinedHold = Apply[Join, individualHolds];
+			func = Function[Null, Hold[Block[{##}, ReleaseHold[heldExpr]]], HoldAll];
+			blockHeld = Apply[func, combinedHold];
+		,
+			blockHeld = Hold[ReleaseHold[heldExpr]];
+		];
+		
+		evalResult = Quiet[ReleaseHold[blockHeld]];
 		
 		loopState["printFunction"] = False;
 		Unset[messageFormatter];

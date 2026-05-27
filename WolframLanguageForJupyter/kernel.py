@@ -374,14 +374,16 @@ class WolframLanguageKernel(Kernel):
         
         controls = {}
         control_list = []
+        var_types = {}
         
         for var in variables:
             name = var["name"]
             var_type = var["type"]
             initial = var["initial"]
+            var_types[name] = var_type
             
             if var_type == "Slider":
-                is_float = isinstance(var["min"], float) or isinstance(var["max"], float) or isinstance(var["step"], float)
+                is_float = isinstance(var.get("min", 0), float) or isinstance(var.get("max", 1), float) or isinstance(var.get("step", 0.1), float)
                 slider_cls = widgets.FloatSlider if is_float else widgets.IntSlider
                 step = var["step"] if var["step"] is not None else (0.1 if is_float else 1)
                 
@@ -393,7 +395,7 @@ class WolframLanguageKernel(Kernel):
                     description=name,
                     continuous_update=False
                 )
-            elif var_type == "Dropdown":
+            elif var_type == "Dropdown" or var_type == "PopupMenu":
                 choices = [(choice["label"], choice["value"]) for choice in var["choices"]]
                 control = widgets.Dropdown(
                     options=choices,
@@ -405,68 +407,173 @@ class WolframLanguageKernel(Kernel):
                     value=bool(initial),
                     description=name
                 )
+            elif var_type == "RadioButton":
+                choices = [(choice["label"], choice["value"]) for choice in var["choices"]]
+                control = widgets.RadioButtons(
+                    options=choices,
+                    value=initial,
+                    description=name
+                )
+            elif var_type == "SetterBar":
+                choices = [(choice["label"], choice["value"]) for choice in var["choices"]]
+                control = widgets.ToggleButtons(
+                    options=choices,
+                    value=initial,
+                    description=name
+                )
+            elif var_type == "InputField":
+                control = widgets.Text(
+                    value=str(initial) if initial is not None else "",
+                    description=name,
+                    continuous_update=False
+                )
+            elif var_type == "Trigger":
+                is_float = isinstance(var.get("min", 0), float) or isinstance(var.get("max", 1), float) or isinstance(var.get("step", 0.1), float)
+                slider_cls = widgets.FloatSlider if is_float else widgets.IntSlider
+                step = var["step"] if var["step"] is not None else (0.1 if is_float else 1)
+                
+                slider = slider_cls(
+                    value=initial,
+                    min=var["min"],
+                    max=var["max"],
+                    step=step,
+                    description=name,
+                    continuous_update=False
+                )
+                
+                play = widgets.Play(
+                    value=0,
+                    min=0,
+                    max=100,
+                    step=1,
+                    interval=100
+                )
+                
+                # Bidirectional observers
+                def make_play_observer(s_ctrl, v_min, v_max):
+                    def on_play_change(change):
+                        pct = change['new'] / 100.0
+                        s_ctrl.value = v_min + pct * (v_max - v_min)
+                    return on_play_change
+                    
+                play.observe(make_play_observer(slider, var["min"], var["max"]), names='value')
+                
+                def make_slider_observer(p_ctrl, v_min, v_max):
+                    def on_slider_change(change):
+                        val = change['new']
+                        if v_max != v_min:
+                            pct = (val - v_min) / (v_max - v_min)
+                            p_ctrl.value = int(pct * 100)
+                    return on_slider_change
+                    
+                slider.observe(make_slider_observer(play, var["min"], var["max"]), names='value')
+                
+                control = widgets.HBox([play, slider])
+            elif var_type == "Locator":
+                init_x = 0.0
+                init_y = 0.0
+                if isinstance(initial, list) and len(initial) == 2:
+                    init_x = float(initial[0])
+                    init_y = float(initial[1])
+                
+                x_slider = widgets.FloatSlider(value=init_x, min=-1.0, max=1.0, step=0.01, description=f"{name}_x", continuous_update=False)
+                y_slider = widgets.FloatSlider(value=init_y, min=-1.0, max=1.0, step=0.01, description=f"{name}_y", continuous_update=False)
+                control = widgets.VBox([x_slider, y_slider])
             else:
                 continue
                 
             controls[name] = control
             control_list.append(control)
             
-        output = widgets.Output()
+        stdout_area = widgets.HTML(value="")
+        stderr_area = widgets.HTML(value="")
+        display_area = widgets.HTML(value="")
+        output_box = widgets.VBox([stdout_area, stderr_area, display_area])
+        
+        def get_val(ctrl, var_type):
+            if var_type == "Trigger":
+                return ctrl.children[1].value
+            elif var_type == "Locator":
+                return [ctrl.children[0].value, ctrl.children[1].value]
+            else:
+                return ctrl.value
         
         def update_output(*args):
-            bindings = {name: ctrl.value for name, ctrl in controls.items()}
+            bindings = {name: get_val(ctrl, var_types[name]) for name, ctrl in controls.items()}
             try:
                 func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateManipulate"), expr_str, bindings)
                 eval_res = self.wl_session.evaluate(func)
                 
-                new_outputs = []
                 if isinstance(eval_res, dict) and eval_res.get("status") == "ok":
                     stdout = eval_res.get("captured_stdout", "")
                     if stdout:
-                        new_outputs.append({
-                            "output_type": "stream",
-                            "name": "stdout",
-                            "text": stdout
-                        })
+                        stdout_area.value = f"<pre style='margin: 0; font-family: monospace;'>{stdout}</pre>"
+                        stdout_area.layout.display = 'block'
+                    else:
+                        stdout_area.value = ""
+                        stdout_area.layout.display = 'none'
                     
                     stderr = eval_res.get("captured_stderr", [])
                     if stderr:
-                        new_outputs.append({
-                            "output_type": "stream",
-                            "name": "stderr",
-                            "text": "\n".join(stderr) + "\n"
-                        })
+                        stderr_text = "\n".join(stderr)
+                        stderr_area.value = f"<pre style='margin: 0; font-family: monospace; color: red;'>{stderr_text}</pre>"
+                        stderr_area.layout.display = 'block'
+                    else:
+                        stderr_area.value = ""
+                        stderr_area.layout.display = 'none'
                         
                     mime = eval_res.get("mime_bundle", {})
                     if mime:
                         data_dict = mime.get("data", {})
                         metadata_dict = mime.get("metadata", {})
-                        new_outputs.append({
-                            "output_type": "display_data",
-                            "data": data_dict,
-                            "metadata": metadata_dict
-                        })
+                        
+                        if "image/svg+xml" in data_dict:
+                            display_area.value = data_dict["image/svg+xml"]
+                        elif "image/png" in data_dict:
+                            png_base64 = data_dict["image/png"]
+                            png_meta = metadata_dict.get("image/png", {})
+                            width = png_meta.get("width")
+                            height = png_meta.get("height")
+                            
+                            style_str = ""
+                            if width and height:
+                                style_str = f"width: {width}px; height: {height}px;"
+                            elif width:
+                                style_str = f"width: {width}px;"
+                            
+                            display_area.value = f'<img src="data:image/png;base64,{png_base64}" style="{style_str}" />'
+                        elif "text/html" in data_dict:
+                            display_area.value = data_dict["text/html"]
+                        elif "text/plain" in data_dict:
+                            display_area.value = f"<pre style='margin: 0; font-family: monospace;'>{data_dict['text/plain']}</pre>"
+                        else:
+                            display_area.value = ""
+                    else:
+                        display_area.value = ""
                 else:
-                    new_outputs.append({
-                        "output_type": "stream",
-                        "name": "stderr",
-                        "text": f"Error evaluating Manipulate: {eval_res}\n"
-                    })
-                output.outputs = tuple(new_outputs)
+                    err_msg = f"Error evaluating Manipulate: {eval_res}"
+                    stderr_area.value = f"<pre style='margin: 0; font-family: monospace; color: red;'>{err_msg}</pre>"
+                    stderr_area.layout.display = 'block'
+                    display_area.value = ""
             except Exception as e:
-                output.outputs = ({
-                    "output_type": "stream",
-                    "name": "stderr",
-                    "text": f"Error in update_output: {e}\n"
-                },)
+                err_msg = f"Error in update_output: {e}"
+                stderr_area.value = f"<pre style='margin: 0; font-family: monospace; color: red;'>{err_msg}</pre>"
+                stderr_area.layout.display = 'block'
                     
-        for ctrl in control_list:
-            ctrl.observe(update_output, names='value')
+        for name, ctrl in controls.items():
+            var_type = var_types[name]
+            if var_type == "Trigger":
+                ctrl.children[1].observe(update_output, names='value')
+            elif var_type == "Locator":
+                ctrl.children[0].observe(update_output, names='value')
+                ctrl.children[1].observe(update_output, names='value')
+            else:
+                ctrl.observe(update_output, names='value')
             
         update_output()
         
         controls_layout = widgets.VBox(control_list)
-        widget_box = widgets.VBox([controls_layout, output])
+        widget_box = widgets.VBox([controls_layout, output_box])
         return widget_box
 
 

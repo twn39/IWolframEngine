@@ -24,6 +24,9 @@ class TestWidgets(unittest.TestCase):
         
         kernel = WolframLanguageKernel()
         
+        # Reset mocks to ensure test isolation
+        mock_widgets.reset_mock()
+        
         # Mock VBox and DOMWidget model ID
         mock_box = MagicMock()
         mock_box.model_id = "test-model-id-12345"
@@ -107,6 +110,58 @@ class TestWidgets(unittest.TestCase):
             ])
             
             print("Widgets serialization, IntSlider, FloatSlider, Checkbox, Dropdown and Symbolic Bounds test PASSED!")
+            
+        finally:
+            kernel.do_shutdown(restart=False)
+            loop.close()
+
+    def test_advanced_manipulate_widgets(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        kernel = WolframLanguageKernel()
+        
+        # Reset mocks
+        mock_widgets.reset_mock()
+        
+        mock_box = MagicMock()
+        mock_box.model_id = "test-model-id-67890"
+        mock_widgets.VBox.return_value = mock_box
+        mock_widgets.HBox.return_value = mock_box
+        
+        try:
+            # Code containing SetterBar, RadioButton, InputField, Trigger, PopupMenu, Locator
+            code = 'Manipulate[x, {a, 1, 5, ControlType -> SetterBar}, {b, {"yes", "no"}, ControlType -> RadioButton}, {c, 10, ControlType -> InputField}, {t, 0, 10, ControlType -> Trigger}, {m, {1, 2}, ControlType -> PopupMenu}, {pt, {0.5, -0.5}, ControlType -> Locator}]'
+            res = loop.run_until_complete(kernel.do_execute(code, silent=False))
+            self.assertEqual(res['status'], 'ok')
+            
+            # Verify SetterBar -> ToggleButtons
+            mock_widgets.ToggleButtons.assert_called_once()
+            setter_args = mock_widgets.ToggleButtons.call_args[1]
+            self.assertEqual(setter_args['description'], 'a')
+            
+            # Verify RadioButton -> RadioButtons
+            mock_widgets.RadioButtons.assert_called_once()
+            radio_args = mock_widgets.RadioButtons.call_args[1]
+            self.assertEqual(radio_args['description'], 'b')
+            
+            # Verify InputField -> Text
+            mock_widgets.Text.assert_called_once()
+            input_args = mock_widgets.Text.call_args[1]
+            self.assertEqual(input_args['description'], 'c')
+            
+            # Verify Trigger -> Play + FloatSlider/IntSlider inside HBox
+            mock_widgets.Play.assert_called_once()
+            
+            # Verify PopupMenu -> Dropdown (we should have Dropdown called)
+            mock_widgets.Dropdown.assert_called_once()
+            dropdown_args = mock_widgets.Dropdown.call_args[1]
+            self.assertEqual(dropdown_args['description'], 'm')
+            
+            # Verify Locator -> Two FloatSliders (called for pt_x, pt_y)
+            self.assertTrue(mock_widgets.FloatSlider.call_count >= 2)
+            
+            print("Advanced widgets serialization (SetterBar, RadioButton, InputField, Trigger, PopupMenu, Locator) test PASSED!")
             
         finally:
             kernel.do_shutdown(restart=False)
