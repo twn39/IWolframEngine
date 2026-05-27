@@ -249,6 +249,36 @@ try:
     assert "http://reference.wolfram.com/language/ref/Plot.html" in data["text/html"], "HTML inspect reply missing reference link"
     print("Rich Inspection test passed!")
 
+    # Test Case 6: is_complete
+    print("\n[TEST] Verifying is_complete...")
+    
+    # Complete
+    is_comp_msg_id = kc.is_complete('1 + 2')
+    is_comp_reply = get_reply_for_msg_id(kc, is_comp_msg_id)
+    print(f"is_complete reply for '1 + 2': {is_comp_reply['content']}")
+    assert is_comp_reply['content']['status'] == 'complete', f"Expected complete, got {is_comp_reply['content']}"
+    
+    # Incomplete (trailing operator)
+    is_comp_msg_id = kc.is_complete('1 + ')
+    is_comp_reply = get_reply_for_msg_id(kc, is_comp_msg_id)
+    print(f"is_complete reply for '1 + ': {is_comp_reply['content']}")
+    assert is_comp_reply['content']['status'] == 'incomplete', f"Expected incomplete, got {is_comp_reply['content']}"
+    assert is_comp_reply['content'].get('indent') == '    ', f"Expected indent '    ', got {is_comp_reply['content'].get('indent')!r}"
+    
+    # Incomplete (unclosed bracket)
+    is_comp_msg_id = kc.is_complete('f[x')
+    is_comp_reply = get_reply_for_msg_id(kc, is_comp_msg_id)
+    print(f"is_complete reply for 'f[x': {is_comp_reply['content']}")
+    assert is_comp_reply['content']['status'] == 'incomplete', f"Expected incomplete, got {is_comp_reply['content']}"
+    
+    # Invalid (mismatched bracket)
+    is_comp_msg_id = kc.is_complete('f[x)')
+    is_comp_reply = get_reply_for_msg_id(kc, is_comp_msg_id)
+    print(f"is_complete reply for 'f[x)': {is_comp_reply['content']}")
+    assert is_comp_reply['content']['status'] == 'invalid', f"Expected invalid, got {is_comp_reply['content']}"
+    
+    print("is_complete tests passed!")
+
     print("\n--- RESULTS ---")
     stdout_str = ''.join(stdout).strip()
     print(f"Stdout output: {stdout_str}")

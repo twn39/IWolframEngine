@@ -897,6 +897,130 @@ class WolframLanguageKernel(Kernel):
             
         return {'status': 'ok', 'found': False, 'data': {}, 'metadata': {}}
 
+    def _check_completeness(self, code: str) -> tuple[str, str]:
+        """
+        本地分析器：分析 Wolfram 代码是否语法完整。
+        返回 (status, indent)，其中 status 为 'complete'、'incomplete' 或 'invalid'。
+        """
+        stack = []
+        in_string = False
+        comment_depth = 0
+        i = 0
+        n = len(code)
+        
+        last_non_ws_char = None
+        last_non_ws_index = -1
+        
+        while i < n:
+            if in_string:
+                if code[i:i+2] == '\\"' or code[i:i+2] == '\\\\':
+                    i += 2
+                elif code[i] == '"':
+                    in_string = False
+                    i += 1
+                else:
+                    i += 1
+            elif comment_depth > 0:
+                if code[i:i+2] == '(*':
+                    comment_depth += 1
+                    i += 2
+                elif code[i:i+2] == '*)':
+                    comment_depth -= 1
+                    i += 2
+                else:
+                    i += 1
+            else:
+                char = code[i]
+                if char == '"':
+                    in_string = True
+                    last_non_ws_char = '"'
+                    last_non_ws_index = i
+                    i += 1
+                elif code[i:i+2] == '(*':
+                    comment_depth = 1
+                    i += 2
+                elif code[i:i+2] == '<|':
+                    stack.append('<|')
+                    last_non_ws_char = '|'
+                    last_non_ws_index = i + 1
+                    i += 2
+                elif code[i:i+2] == '|>':
+                    if stack and stack[-1] == '<|':
+                        stack.pop()
+                        last_non_ws_char = '>'
+                        last_non_ws_index = i + 1
+                        i += 2
+                    else:
+                        return 'invalid', ''
+                elif char in '([{':
+                    stack.append(char)
+                    last_non_ws_char = char
+                    last_non_ws_index = i
+                    i += 1
+                elif char in ')]}':
+                    if not stack:
+                        return 'invalid', ''
+                    opening = stack.pop()
+                    if (char == ')' and opening != '(') or \
+                       (char == ']' and opening != '[') or \
+                       (char == '}' and opening != '{'):
+                        return 'invalid', ''
+                    last_non_ws_char = char
+                    last_non_ws_index = i
+                    i += 1
+                else:
+                    if not char.isspace():
+                        last_non_ws_char = char
+                        last_non_ws_index = i
+                    i += 1
+                    
+        if in_string or comment_depth > 0 or stack:
+            # 每一层未闭合的括号增加 4 个空格缩进
+            indent_level = len(stack)
+            if in_string or comment_depth > 0:
+                indent_level += 1
+            return 'incomplete', '    ' * indent_level
+
+        if last_non_ws_char is not None:
+            # 若以续行符/操作符结尾，则属于 incomplete
+            if last_non_ws_char in '+-*/^=><,@~:|':
+                if last_non_ws_char == '>':
+                    # 区分 |> (结合闭合) 和 纯大于号/规则符号 (->, :>, >)
+                    if last_non_ws_index > 0 and code[last_non_ws_index - 1] == '|':
+                        pass
+                    else:
+                        return 'incomplete', '    '
+                else:
+                    return 'incomplete', '    '
+            
+            # && 逻辑与结尾
+            if last_non_ws_char == '&':
+                if last_non_ws_index > 0 and code[last_non_ws_index - 1] == '&':
+                    return 'incomplete', '    '
+                
+            # . 点号结尾（排除类似 3. 的浮点数）
+            if last_non_ws_char == '.':
+                if last_non_ws_index > 0 and code[last_non_ws_index - 1].isdigit():
+                    pass
+                else:
+                    return 'incomplete', '    '
+
+        return 'complete', ''
+
+    def do_is_complete(self, code: str) -> dict:
+        """
+        Jupyter protocol: 检查代码输入是否完整。
+        """
+        try:
+            status, indent = self._check_completeness(code)
+            reply = {'status': status}
+            if status == 'incomplete':
+                reply['indent'] = indent
+            return reply
+        except Exception as e:
+            self.log.error(f"Error in do_is_complete: {e}")
+            return {'status': 'unknown'}
+
     def do_shutdown(self, restart):
         if hasattr(self, "stdin_server") and self.stdin_server:
             self.stdin_server.close()
