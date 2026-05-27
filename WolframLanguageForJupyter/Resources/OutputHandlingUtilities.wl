@@ -1141,6 +1141,10 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 				If[initVal === None, 
 					initVal = If[Length[choices] > 0, First[choices], None];
 				];
+				
+				If[Head[initVal] === Rule || Head[initVal] === RuleDelayed,
+					initVal = initVal[[1]];
+				];
 				formatChoice[val_ -> label_] := Association["label" -> ToString[label], "value" -> ToString[val, InputForm]];
 				formatChoice[val_] := Association["label" -> ToString[val], "value" -> ToString[val, InputForm]];
 				formattedChoices = formatChoice /@ choices;
