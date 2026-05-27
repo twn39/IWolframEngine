@@ -53,7 +53,10 @@ testCases = {
   {"Developer`To", 0, {"Developer`ToPackedArray"}, True},
   
   (* 4. No completion case *)
-  {"1 + 2", 5, {}, False}
+  {"1 + 2", 5, {}, False},
+
+  (* 5. Option name completion *)
+  {"Plot[Sin[x], {x, 0, Pi}, PlotSty", 25, {"PlotStyle"}, True}
 };
 
 success = True;
@@ -65,7 +68,7 @@ Do[
   expectMatch = tc[[4]];
   
   Print["--- Testing Autocomplete: ", InputForm[code], " ---"];
-  res = getCompletions[code];
+  res = getCompletions[code, StringLength[code]];
   
   If[!AssociationQ[res],
     Print["FAILED! Expected Association, got: ", InputForm[res]];

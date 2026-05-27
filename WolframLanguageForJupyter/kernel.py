@@ -747,9 +747,8 @@ class WolframLanguageKernel(Kernel):
             self._interrupt_needs_restart = False
 
     def do_complete(self, code, cursor_pos):
-        prefix = code[:cursor_pos]
         try:
-            func = WLFunction(WLSymbol("WolframLanguageForJupyter`getCompletions"), prefix)
+            func = WLFunction(WLSymbol("WolframLanguageForJupyter`getCompletions"), code, cursor_pos)
             res = self.wl_session.evaluate(func)
             if isinstance(res, dict):
                 return {

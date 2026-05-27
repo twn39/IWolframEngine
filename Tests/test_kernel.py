@@ -81,6 +81,16 @@ try:
     assert comp_reply2['content']['cursor_end'] == 8, f"Expected cursor_end 8, got {comp_reply2['content']['cursor_end']}"
     print("Autocomplete Unicode check inside integration test PASSED!")
 
+    print("\nSending complete request for option 'Plot[Sin[x], {x, 0, Pi}, PlotSty'...")
+    comp_msg_id3 = kc.complete('Plot[Sin[x], {x, 0, Pi}, PlotSty', 32)
+    comp_reply3 = get_reply_for_msg_id(kc, comp_msg_id3)
+    print(f"[SHELL] complete reply 3: {comp_reply3['content']}")
+    assert comp_reply3['content']['status'] == 'ok', "Complete request status not ok"
+    assert "PlotStyle" in comp_reply3['content']['matches'], "Complete matches missing 'PlotStyle'"
+    assert comp_reply3['content']['cursor_start'] == 25, f"Expected cursor_start 25, got {comp_reply3['content']['cursor_start']}"
+    assert comp_reply3['content']['cursor_end'] == 32, f"Expected cursor_end 32, got {comp_reply3['content']['cursor_end']}"
+    print("Autocomplete Option check inside integration test PASSED!")
+
     print("\nSending graphics execute request: 'Graphics[{Red, Disk[]}]'...")
     # Flush any stale IOPub messages before starting
     while True:
