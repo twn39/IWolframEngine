@@ -688,6 +688,329 @@ class WolframLanguageKernel(Kernel):
                 }
         return results
 
+    def _parse_execution_segments(self, code: str) -> list[dict]:
+        lines = code.splitlines(keepends=True)
+        if not lines:
+            return []
+            
+        first_non_empty_idx = -1
+        for idx, line in enumerate(lines):
+            if line.strip():
+                first_non_empty_idx = idx
+                break
+                
+        if first_non_empty_idx != -1 and lines[first_non_empty_idx].strip().startswith("%%sh"):
+            cell_code = "".join(lines[first_non_empty_idx+1:])
+            return [{'type': 'sh', 'content': cell_code}]
+            
+        segments = []
+        current_wolfram = []
+        
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("%%sh"):
+                # If they write cell magic in the middle of cell (unusual but supported), treat remaining as shell
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                prefix_idx = line.find("%%sh")
+                cell_code = line[prefix_idx + 4:] + "".join(lines[lines.index(line)+1:])
+                segments.append({'type': 'sh', 'content': cell_code})
+                break
+            elif stripped.startswith("%sh") and (len(stripped) == 3 or stripped[3].isspace()):
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                prefix_idx = line.find("%sh")
+                cmd = line[prefix_idx + 3:].strip()
+                segments.append({'type': 'sh', 'content': cmd})
+            elif stripped.startswith("%workspace") and (len(stripped) == 10 or stripped[10].isspace()):
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                segments.append({'type': 'workspace'})
+            elif stripped.startswith("%clear") and (len(stripped) == 6 or stripped[6].isspace()):
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                segments.append({'type': 'clear'})
+            elif stripped.startswith("%session") and (len(stripped) == 8 or stripped[8].isspace()):
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                prefix_idx = line.find("%session")
+                action = line[prefix_idx + 8:].strip().lower() or "info"
+                segments.append({'type': 'session', 'action': action})
+            else:
+                current_wolfram.append(line)
+                
+        if current_wolfram:
+            segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+            
+        return segments
+
+    async def _run_shell_command(self, cmd_line: str, silent: bool) -> dict:
+        if not cmd_line.strip():
+            return {'status': 'ok'}
+            
+        try:
+            process = await asyncio.create_subprocess_shell(
+                cmd_line,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            async def read_stream(stream, name):
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    decoded_line = line.decode('utf-8', errors='replace')
+                    if not silent:
+                        self.send_response(self.iopub_socket, 'stream', {
+                            'name': name,
+                            'text': decoded_line
+                        })
+            
+            await asyncio.gather(
+                read_stream(process.stdout, 'stdout'),
+                read_stream(process.stderr, 'stderr')
+            )
+            
+            returncode = await process.wait()
+            if returncode != 0:
+                if not silent:
+                    self.send_response(self.iopub_socket, 'stream', {
+                        'name': 'stderr',
+                        'text': f"\nShell command failed with exit code {returncode}\n"
+                    })
+                return {
+                    'status': 'error',
+                    'ename': 'ShellError',
+                    'evalue': f'Exit code {returncode}',
+                    'traceback': [f"Exit code {returncode}"]
+                }
+            return {'status': 'ok'}
+        except Exception as e:
+            if not silent:
+                self.send_response(self.iopub_socket, 'stream', {
+                    'name': 'stderr',
+                    'text': f"Error executing shell command: {e}\n"
+                })
+            return {
+                'status': 'error',
+                'ename': type(e).__name__,
+                'evalue': str(e),
+                'traceback': [str(e)]
+            }
+
+    def _format_workspace_report(self, var_list: list) -> dict:
+        if not var_list:
+            html = '<div style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; padding: 10px; color: var(--jp-content-font-color2, #666);">Workspace is empty (no variables defined in Global` context).</div>'
+            text = "Workspace is empty."
+            return {'text/plain': text, 'text/html': html}
+            
+        rows = []
+        for var in var_list:
+            name = var.get("name", "") if isinstance(var, dict) else ""
+            v_type = var.get("type", "") if isinstance(var, dict) else ""
+            size = var.get("size", 0) if isinstance(var, dict) else 0
+            val_prev = var.get("value", "") if isinstance(var, dict) else ""
+            
+            # If name is a WLSymbol, convert to string
+            if hasattr(name, 'name'):
+                name = name.name
+            if hasattr(v_type, 'name'):
+                v_type = v_type.name
+                
+            name = str(name)
+            v_type = str(v_type)
+            val_prev = str(val_prev)
+            
+            if size < 1024:
+                size_str = f"{size} B"
+            elif size < 1024 * 1024:
+                size_str = f"{size / 1024:.1f} KB"
+            else:
+                size_str = f"{size / (1024 * 1024):.1f} MB"
+                
+            rows.append(f"""
+            <tr>
+                <td style="font-weight: bold; color: #d9534f;">{name}</td>
+                <td style="font-family: monospace; color: #4b86b4;">{v_type}</td>
+                <td style="text-align: right; font-family: monospace;">{size_str}</td>
+                <td><pre style="margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 12px; background: none; border: none; padding: 0;">{val_prev}</pre></td>
+            </tr>
+            """)
+            
+        html = f"""
+        <div class="wolfram-workspace-container">
+            <style>
+                .wolfram-workspace-container {{ overflow-x: auto; margin: 12px 0; }}
+                table.wolfram-workspace {{ border-collapse: collapse; font-family: var(--jp-content-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif); font-size: var(--jp-content-font-size1, 14px); color: var(--jp-content-font-color1, black); border: 1px solid var(--jp-border-color1, #dcdcdc); text-align: left; min-width: 600px; background-color: var(--jp-layout-color1, #ffffff); box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-radius: 4px; }}
+                table.wolfram-workspace th {{ background-color: var(--jp-layout-color2, #f5f5f5); color: var(--jp-content-font-color1, black); font-weight: 600; padding: 8px 12px; border: 1px solid var(--jp-border-color1, #dcdcdc); }}
+                table.wolfram-workspace td {{ padding: 8px 12px; border: 1px solid var(--jp-border-color2, #e0e0e0); vertical-align: middle; }}
+                table.wolfram-workspace tbody tr:nth-child(even) {{ background-color: var(--jp-layout-color2, #fafafa); }}
+                table.wolfram-workspace tbody tr:hover {{ background-color: var(--jp-layout-color3, #f0f0f0); }}
+            </style>
+            <table class="wolfram-workspace">
+                <thead>
+                    <tr>
+                         <th>Variable</th>
+                         <th>Type (Head)</th>
+                         <th>Size</th>
+                         <th>Value / Definition</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(rows)}
+                </tbody>
+            </table>
+         </div>
+         """
+         
+        text_rows = []
+        for var in var_list:
+            var_name = var.get("name", "")
+            if hasattr(var_name, 'name'):
+                var_name = var_name.name
+            var_type = var.get("type", "")
+            if hasattr(var_type, 'name'):
+                var_type = var_type.name
+            text_rows.append(f"{var_name}: Head={var_type}, Size={var.get('size')} Bytes, Value={var.get('value')}")
+        text = "Workspace variables:\n" + "\n".join(text_rows)
+        
+        return {'text/plain': text, 'text/html': html}
+
+    def _get_subprocess_memory(self, pid: int) -> int | None:
+        """Get the memory RSS of the process with given PID. Attempts psutil first, then falls back to ps command."""
+        if pid is None:
+            return None
+        try:
+            import psutil
+            process = psutil.Process(pid)
+            return process.memory_info().rss
+        except Exception:
+            # Fallback for macOS/Linux using ps command
+            try:
+                import subprocess
+                out = subprocess.check_output(["ps", "-p", str(pid), "-o", "rss"]).decode('utf-8', errors='ignore')
+                lines = out.strip().splitlines()
+                if len(lines) >= 2:
+                    rss_kb = int(lines[1].strip())
+                    return rss_kb * 1024
+            except Exception:
+                pass
+        return None
+
+    def _format_session_info(self, info: dict) -> dict:
+        # Formatted memory
+        mem = info.get("memory_bytes")
+        if mem is None:
+            mem_str = "Unknown"
+        elif mem < 1024:
+            mem_str = f"{mem} B"
+        elif mem < 1024 * 1024:
+            mem_str = f"{mem / 1024:.1f} KB"
+        elif mem < 1024 * 1024 * 1024:
+            mem_str = f"{mem / (1024 * 1024):.1f} MB"
+        else:
+            mem_str = f"{mem / (1024 * 1024 * 1024):.1f} GB"
+
+        # Formatted context path
+        ctx_list = info.get("context_path", [])
+        if isinstance(ctx_list, (list, tuple)):
+            ctx_str = ", ".join(ctx_list)
+        else:
+            ctx_str = str(ctx_list)
+
+        rows = [
+            ("Wolfram Version", info.get("version", "Unknown")),
+            ("License Type", info.get("license_type", "Unknown")),
+            ("License ID", info.get("license_id", "Unknown")),
+            ("Machine ID", info.get("machine_id", "Unknown")),
+            ("System ID", info.get("system_id", "Unknown")),
+            ("Context Path", ctx_str),
+            ("Process ID (PID)", str(info.get("pid", "Unknown"))),
+            ("Memory Usage", mem_str),
+            ("Executable Path", info.get("executable_path", "Unknown")),
+            ("Stdin Bridge Port", str(info.get("stdin_port", "Unknown"))),
+        ]
+
+        html_rows = []
+        for label, val in rows:
+            html_rows.append(f"""
+            <tr>
+                <td style="font-weight: 600; color: var(--jp-content-font-color2, #555); width: 180px; padding: 6px 12px; border: 1px solid var(--jp-border-color2, #e0e0e0);">{label}</td>
+                <td style="font-family: monospace; color: var(--jp-content-font-color1, #111); padding: 6px 12px; border: 1px solid var(--jp-border-color2, #e0e0e0); white-space: pre-wrap; word-break: break-all;">{val}</td>
+            </tr>
+            """)
+
+        html = f"""
+        <div class="wolfram-session-container" style="margin: 12px 0; font-family: var(--jp-content-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif);">
+            <style>
+                .wolfram-session-card {{
+                    border: 1px solid var(--jp-border-color1, #dcdcdc);
+                    border-radius: 6px;
+                    background-color: var(--jp-layout-color1, #ffffff);
+                    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+                    overflow: hidden;
+                    max-width: 800px;
+                }}
+                .wolfram-session-header {{
+                    background-color: var(--jp-layout-color2, #f5f5f5);
+                    padding: 10px 16px;
+                    border-bottom: 1px solid var(--jp-border-color1, #dcdcdc);
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                }}
+                .wolfram-session-title {{
+                    font-weight: bold;
+                    font-size: 14px;
+                    color: var(--jp-content-font-color1, #333);
+                }}
+                .wolfram-session-status {{
+                    display: inline-flex;
+                    align-items: center;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: #5cb85c;
+                }}
+                .wolfram-session-status::before {{
+                    content: "";
+                    display: inline-block;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 50%;
+                    background-color: #5cb85c;
+                    margin-right: 6px;
+                }}
+                .wolfram-session-table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    font-size: 13px;
+                }}
+            </style>
+            <div class="wolfram-session-card">
+                <div class="wolfram-session-header">
+                    <span class="wolfram-session-title">Wolfram Engine Session Information</span>
+                    <span class="wolfram-session-status">Active</span>
+                </div>
+                <table class="wolfram-session-table">
+                    <tbody>
+                        {"".join(html_rows)}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        """
+
+        text_rows = [f"{label}: {val}" for label, val in rows]
+        text = "Wolfram Engine Session Information:\n" + "\n".join(text_rows)
+
+        return {'text/plain': text, 'text/html': html}
+
     async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
         if not code.strip():
             return {
@@ -704,108 +1027,274 @@ class WolframLanguageKernel(Kernel):
         self._executing = True
         self._interrupted = False
         try:
-            # Fix 4: 传递 Python 端的 execution_count，使 In[n]/Out[n] 与前端保持同步
-            func = WLFunction(
-                WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"),
-                code,
-                self.execution_count
-            )
-            res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
-
-            # 中断后 WL 可能返回 $Aborted（非 dict），此处检查必须在 isinstance 之前
-            if getattr(self, "_interrupted", False):
-                # 交由下方 except 块统一处理（即使没有异常抛出）
-                raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
+            segments = self._parse_execution_segments(code)
+            exec_count = self.execution_count
+            execute_result_sent = False
+            last_res = None
+            wolfram_segment_idx = 0
             
-            if not isinstance(res, dict):
-                # Fallback in case evaluation returned something unexpected
-                return {
-                    'status': 'error',
-                    'ename': 'TypeError',
-                    'evalue': f'Unexpected return type from evaluator: {type(res)}',
-                    'traceback': [str(res)]
-                }
-                
-            stdout_str = res.get("captured_stdout", "")
-            if stdout_str:
-                self.send_response(self.iopub_socket, 'stream', {'name': 'stdout', 'text': stdout_str})
-
-            stderr_list = res.get("captured_stderr", [])
-            if stderr_list:
-                stderr_str = "\n".join(str(msg) for msg in stderr_list) + "\n"
-                self.send_response(self.iopub_socket, 'stream', {'name': 'stderr', 'text': stderr_str})
-
-            if res.get("status") == "error":
-                ename = res.get("ename", "Error")
-                evalue = res.get("evalue", "")
-                traceback = res.get("traceback", [])
-                
-                self.send_response(self.iopub_socket, 'error', {
-                    'ename': ename,
-                    'evalue': evalue,
-                    'traceback': list(traceback)
-                })
-                return {
-                    'status': 'error',
-                    'ename': ename,
-                    'evalue': evalue,
-                    'traceback': list(traceback)
-                }
-
-            # Fix 2: 处理 mime_bundles 列表
-            # 第 1 个 bundle → execute_result（带 execution_count 提示符编号）
-            # 后续 bundles → display_data（无编号，视为执行副作用）
-            mime_bundles = res.get("mime_bundles", [])
-            exec_count = res.get("execution_count", self.execution_count)
-            
-            if not silent:
-                for i, bundle in enumerate(mime_bundles):
-                    data = bundle.get("data", {})
-                    metadata = bundle.get("metadata", {})
+            for segment in segments:
+                if getattr(self, "_interrupted", False):
+                    raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
                     
-                    # Prevent SVG ID collisions in browser rendering
-                    if "image/svg+xml" in data:
-                        import uuid
-                        unique_id = str(uuid.uuid4().hex)[:8]
-                        data = dict(data)
-                        data["image/svg+xml"] = data["image/svg+xml"].replace("glyph", f"glyph_{unique_id}").replace("clip", f"clip_{unique_id}")
-                    
-                    # Manipulate 控件处理（保持原有逻辑，每个 bundle 独立检查）
-                    if "application/x-wolfram-manipulate" in data:
-                        try:
-                            widget_box = self.create_manipulate_widget(
-                                data["application/x-wolfram-manipulate"]
-                            )
-                            data = {
-                                "application/vnd.jupyter.widget-view+json": {
-                                    "version_major": 2,
-                                    "version_minor": 0,
-                                    "model_id": widget_box.model_id
-                                },
-                                "text/plain": repr(widget_box)
-                            }
-                            metadata = {}
-                        except Exception as w_err:
-                            self.log.error(f"Error creating manipulate widget: {w_err}")
-                    
-                    if i == 0:
-                        # 第一个结果：execute_result（符合 Jupyter 协议：带 [n] 提示符）
-                        self.send_response(self.iopub_socket, 'execute_result', {
-                            'execution_count': exec_count,
-                            'data': data,
-                            'metadata': metadata
-                        })
+                if segment['type'] == 'sh':
+                    sh_res = await self._run_shell_command(segment['content'], silent)
+                    if sh_res.get("status") == "error":
+                        return {
+                            'status': 'error',
+                            'ename': sh_res.get("ename", "ShellError"),
+                            'evalue': sh_res.get("evalue", ""),
+                            'traceback': sh_res.get("traceback", []),
+                            'execution_count': exec_count
+                        }
+                elif segment['type'] == 'workspace':
+                    wl_query = """
+                    Begin["WolframLanguageForJupyter`Private`"];
+                    getWorkspace[] := Module[{symNames, syms},
+                        symNames = Names["Global`*"];
+                        syms = Select[symNames, Function[name,
+                            Block[{shortName = StringReplace[name, "Global`" -> ""], heldSym = ToExpression[name, InputForm, Hold]},
+                                (!StringStartsQ[shortName, "$"]) &&
+                                (!StringStartsQ[shortName, "Private"]) &&
+                                (!StringContainsQ[shortName, "$"]) &&
+                                (
+                                    (OwnValues @@ heldSym) =!= {} ||
+                                    (DownValues @@ heldSym) =!= {} ||
+                                    (SubValues @@ heldSym) =!= {} ||
+                                    (UpValues @@ heldSym) =!= {}
+                                )
+                            ]
+                        ]];
+                        Map[Function[name,
+                            Block[{sym = Symbol[name], value, type, size, shortVal},
+                                type = Head[sym];
+                                size = Quiet[ByteCount[sym]];
+                                If[FailureQ[size], size = 0];
+                                value = sym;
+                                shortVal = Quiet[ToString[Short[value, 3], InputForm]];
+                                If[FailureQ[shortVal], shortVal = ""];
+                                Association[
+                                    "name" -> StringReplace[name, "Global`" -> ""],
+                                    "type" -> ToString[type],
+                                    "size" -> size,
+                                    "value" -> shortVal
+                                ]
+                            ]
+                        ], syms]
+                    ];
+                    res = getWorkspace[];
+                    ClearAll[getWorkspace];
+                    End[];
+                    res
+                    """
+                    res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(wl_query))
+                    if isinstance(res, (list, tuple)):
+                        data_bundle = self._format_workspace_report(res)
                     else:
-                        # 后续结果：display_data（无编号，视为副作用输出）
-                        self.send_response(self.iopub_socket, 'display_data', {
-                            'data': data,
-                            'metadata': metadata,
-                            'transient': {}
+                        data_bundle = self._format_workspace_report([])
+                        
+                    if not silent:
+                        if not execute_result_sent:
+                            self.send_response(self.iopub_socket, 'execute_result', {
+                                'execution_count': exec_count,
+                                'data': data_bundle,
+                                'metadata': {}
+                            })
+                            execute_result_sent = True
+                        else:
+                            self.send_response(self.iopub_socket, 'display_data', {
+                                'data': data_bundle,
+                                'metadata': {},
+                                'transient': {}
+                            })
+                elif segment['type'] == 'clear':
+                    await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate('ClearAll["Global`*"]'))
+                    if not silent:
+                        self.send_response(self.iopub_socket, 'stream', {
+                            'name': 'stdout',
+                            'text': "Cleared all variables in Global` context.\n"
                         })
+                elif segment['type'] == 'session':
+                    action = segment.get('action', 'info')
+                    if action == 'info':
+                        wl_query = """
+                        Association[
+                            "version" -> $Version,
+                            "license_type" -> $LicenseType,
+                            "license_id" -> $LicenseID,
+                            "machine_id" -> $MachineID,
+                            "system_id" -> $SystemID,
+                            "context_path" -> $ContextPath
+                        ]
+                        """
+                        try:
+                            res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(wl_query))
+                        except Exception as e:
+                            res = None
+                            self.log.warning(f"Failed to query session info from Wolfram: {e}")
 
-            # Fix 3: 求值 user_expressions（前端可能用于变量监视等）
+                        pid = None
+                        executable_path = "Unknown"
+                        if self.wl_session and getattr(self.wl_session, "kernel_controller", None):
+                            pid = self.wl_session.kernel_controller.pid
+                        if self.wl_session and getattr(self.wl_session, "kernel", None):
+                            executable_path = self.wl_session.kernel
+
+                        mem_bytes = self._get_subprocess_memory(pid) if pid else None
+
+                        info = {
+                            "version": "Unknown",
+                            "license_type": "Unknown",
+                            "license_id": "Unknown",
+                            "machine_id": "Unknown",
+                            "system_id": "Unknown",
+                            "context_path": [],
+                            "pid": pid,
+                            "memory_bytes": mem_bytes,
+                            "executable_path": executable_path,
+                            "stdin_port": self.stdin_server.port if getattr(self, "stdin_server", None) else "Unknown"
+                        }
+
+                        if isinstance(res, dict):
+                            for k, v in res.items():
+                                if hasattr(v, 'name'):
+                                    v = v.name
+                                info[k] = v
+
+                        if "context_path" in info and isinstance(info["context_path"], (list, tuple)):
+                            info["context_path"] = [c.name if hasattr(c, 'name') else str(c) for c in info["context_path"]]
+
+                        data_bundle = self._format_session_info(info)
+
+                        if not silent:
+                            if not execute_result_sent:
+                                self.send_response(self.iopub_socket, 'execute_result', {
+                                    'execution_count': exec_count,
+                                    'data': data_bundle,
+                                    'metadata': {}
+                                })
+                                execute_result_sent = True
+                            else:
+                                self.send_response(self.iopub_socket, 'display_data', {
+                                    'data': data_bundle,
+                                    'metadata': {},
+                                    'transient': {}
+                                })
+                    elif action == 'restart':
+                        await self.main_loop.run_in_executor(None, lambda: self.restart_wolfram_session())
+                        if not silent:
+                            self.send_response(self.iopub_socket, 'stream', {
+                                'name': 'stdout',
+                                'text': "Wolfram Language session restarted successfully.\n"
+                            })
+                    else:
+                        if not silent:
+                            self.send_response(self.iopub_socket, 'stream', {
+                                'name': 'stderr',
+                                'text': f"Unknown action: {action}. Supported actions: info, restart\n"
+                            })
+                elif segment['type'] == 'wolfram':
+                    seg_count = self.execution_count if wolfram_segment_idx == 0 else 0
+                    wolfram_segment_idx += 1
+                    
+                    func = WLFunction(
+                        WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"),
+                        segment['content'],
+                        seg_count
+                    )
+                    res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
+
+                    if getattr(self, "_interrupted", False):
+                        # 交由下方 except 块统一处理（即使没有异常抛出）
+                        raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
+                    
+                    if not isinstance(res, dict):
+                        # Fallback in case evaluation returned something unexpected
+                        return {
+                            'status': 'error',
+                            'ename': 'TypeError',
+                            'evalue': f'Unexpected return type from evaluator: {type(res)}',
+                            'traceback': [str(res)],
+                            'execution_count': exec_count
+                        }
+                        
+                    stdout_str = res.get("captured_stdout", "")
+                    if stdout_str:
+                        self.send_response(self.iopub_socket, 'stream', {'name': 'stdout', 'text': stdout_str})
+
+                    stderr_list = res.get("captured_stderr", [])
+                    if stderr_list:
+                        stderr_str = "\n".join(str(msg) for msg in stderr_list) + "\n"
+                        self.send_response(self.iopub_socket, 'stream', {'name': 'stderr', 'text': stderr_str})
+
+                    if res.get("status") == "error":
+                        ename = res.get("ename", "Error")
+                        evalue = res.get("evalue", "")
+                        traceback = res.get("traceback", [])
+                        
+                        self.send_response(self.iopub_socket, 'error', {
+                            'ename': ename,
+                            'evalue': evalue,
+                            'traceback': list(traceback)
+                        })
+                        return {
+                            'status': 'error',
+                            'ename': ename,
+                            'evalue': evalue,
+                            'traceback': list(traceback),
+                            'execution_count': exec_count
+                        }
+
+                    last_res = res
+                    mime_bundles = res.get("mime_bundles", [])
+                    exec_count = res.get("execution_count", self.execution_count)
+                    
+                    if not silent:
+                        for bundle in mime_bundles:
+                            data = bundle.get("data", {})
+                            metadata = bundle.get("metadata", {})
+                            
+                            # Prevent SVG ID collisions in browser rendering
+                            if "image/svg+xml" in data:
+                                import uuid
+                                unique_id = str(uuid.uuid4().hex)[:8]
+                                data = dict(data)
+                                data["image/svg+xml"] = data["image/svg+xml"].replace("glyph", f"glyph_{unique_id}").replace("clip", f"clip_{unique_id}")
+                            
+                            # Manipulate 控件处理（保持原有逻辑，每个 bundle 独立检查）
+                            if "application/x-wolfram-manipulate" in data:
+                                try:
+                                    widget_box = self.create_manipulate_widget(
+                                        data["application/x-wolfram-manipulate"]
+                                    )
+                                    data = {
+                                        "application/vnd.jupyter.widget-view+json": {
+                                            "version_major": 2,
+                                            "version_minor": 0,
+                                            "model_id": widget_box.model_id
+                                        },
+                                        "text/plain": repr(widget_box)
+                                    }
+                                    metadata = {}
+                                except Exception as w_err:
+                                    self.log.error(f"Error creating manipulate widget: {w_err}")
+                            
+                            if not execute_result_sent:
+                                self.send_response(self.iopub_socket, 'execute_result', {
+                                    'execution_count': exec_count,
+                                    'data': data,
+                                    'metadata': metadata
+                                })
+                                execute_result_sent = True
+                            else:
+                                self.send_response(self.iopub_socket, 'display_data', {
+                                    'data': data,
+                                    'metadata': metadata,
+                                    'transient': {}
+                                })
+
             evaluated_user_expr = {}
-            if user_expressions and res.get("status") == "ok":
+            if user_expressions and last_res and last_res.get("status") == "ok":
                 evaluated_user_expr = await self._evaluate_user_expressions(user_expressions)
 
             return {
