@@ -1,9 +1,40 @@
-.paclet
-scratch/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter Notebooks & Kernel Connection Files
+*.ipynb
 .ipynb_checkpoints/
 dummy_conn.json
-*.egg-info
-.ipynb_checkpoints
-.idea
-.venv
-/*.ipynb
+
+# IDEs and Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS Specific (macOS, Windows)
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Project & Wolfram Specific
+scratch/
+*.paclet
+
+analysis_report.md

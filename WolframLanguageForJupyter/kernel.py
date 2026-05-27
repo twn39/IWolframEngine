@@ -265,27 +265,74 @@ class WolframLanguageKernel(Kernel):
         
         self._executing = False
         self._interrupted = False
+        # 标记是否需要在中断后强制重启（soft interrupt 失败时才置 True）
+        self._interrupt_needs_restart = False
         
         self.old_sigint_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, self.handle_sigint)
         
         self.start_wolfram_session()
 
+    # ─── 辅助方法：获取 WolframKernel PID ────────────────────────────────────
+    def _get_kernel_pid(self):
+        """通过 kernel_controller.pid（公开 API）获取 WolframKernel 进程 PID。"""
+        try:
+            return self.wl_session.kernel_controller.pid
+        except AttributeError:
+            return None
+
+    def _is_session_alive(self):
+        """检查 WolframKernel 子进程是否仍在运行（poll() == None 表示运行中）。"""
+        try:
+            return (
+                self.wl_session is not None
+                and self.wl_session.started
+                and self.wl_session.kernel_controller.kernel_proc is not None
+                and self.wl_session.kernel_controller.kernel_proc.poll() is None
+            )
+        except Exception:
+            return False
+
+    def _send_soft_interrupt(self):
+        """
+        向 WolframKernel 进程发送 SIGINT（软中断）。
+        WL 收到 SIGINT 后会调用 Abort[]，中止当前计算但保留会话状态。
+        返回 True 表示信号发送成功；False 表示失败（需回退到 terminate）。
+        """
+        pid = self._get_kernel_pid()
+        if pid is None:
+            return False
+        try:
+            if sys.platform == "win32":
+                import ctypes
+                # Windows 需使用 GenerateConsoleCtrlEvent 发送 CTRL_C_EVENT
+                ctypes.windll.kernel32.GenerateConsoleCtrlEvent(0, pid)
+            else:
+                os.kill(pid, signal.SIGINT)
+            self.log.info(f"Sent SIGINT to WolframKernel (PID={pid}) — session preserved.")
+            return True
+        except (ProcessLookupError, PermissionError, OSError) as e:
+            self.log.warning(f"Failed to send SIGINT to PID={pid}: {e}")
+            return False
+
     def handle_sigint(self, signum, frame):
+        """SIGINT 处理器：优先尝试软中断（保留会话），失败才回退到 terminate。"""
         self.log.info("SIGINT received in Python kernel.")
-        if getattr(self, "_executing", False):
-            self._interrupted = True
+        if not getattr(self, "_executing", False):
+            # 不在执行中，无需处理
+            return
+
+        self._interrupted = True
+        soft_ok = self._send_soft_interrupt()
+        if not soft_ok:
+            # 软中断失败，标记需要在 do_execute 中重启
+            self._interrupt_needs_restart = True
+            self.log.warning("Soft interrupt failed, will force-restart session after evaluation returns.")
             if self.wl_session:
                 try:
-                    self.log.info("Terminating running Wolfram session due to interrupt...")
                     self.wl_session.terminate()
                 except Exception as e:
                     self.log.warning(f"Failed to terminate session in SIGINT handler: {e}")
-        if callable(self.old_sigint_handler):
-            try:
-                self.old_sigint_handler(signum, frame)
-            except KeyboardInterrupt:
-                raise
 
     def restart_wolfram_session(self):
         self.log.info("Restarting Wolfram Language session...")
@@ -300,6 +347,22 @@ class WolframLanguageKernel(Kernel):
             self.log.info("Wolfram Language session restarted successfully.")
         except Exception as e:
             self.log.error(f"Failed to restart Wolfram Language session: {e}")
+
+    def _send_interrupt_reply(self, session_restarted: bool):
+        """发送中断相关的 IOPub 消息，告知用户会话状态。"""
+        if session_restarted:
+            note = "Evaluation interrupted by user. The Wolfram session has been restarted. All variables and definitions have been reset."
+        else:
+            note = "Evaluation interrupted by user. Session state preserved — previously defined variables are still available."
+        self.send_response(self.iopub_socket, 'stream', {
+            'name': 'stderr',
+            'text': f"\n\u26a0\ufe0f  {note}\n"
+        })
+        self.send_response(self.iopub_socket, 'error', {
+            'ename': 'KeyboardInterrupt',
+            'evalue': note,
+            'traceback': [f'\033[0;31mKeyboardInterrupt: {note}\033[0m']
+        })
 
     def create_manipulate_widget(self, data):
         import ipywidgets as widgets
@@ -474,6 +537,48 @@ class WolframLanguageKernel(Kernel):
         # Close the package context block in WL
         self.wl_session.evaluate('EndPackage[]')
 
+    async def _evaluate_user_expressions(self, user_expressions):
+        """
+        Fix 3: 求值前端传入的 user_expressions。
+        每个表达式独立静默求值（不影响 In[]/Out[]，不产生 IOPub 输出）。
+        返回符合 Jupyter 协议的 dict：{key: {status, data, metadata} 或 {status, ename, ...}}。
+        """
+        if not user_expressions:
+            return {}
+        results = {}
+        for key, expr_str in user_expressions.items():
+            try:
+                # 使用 Module + Quiet 静默求值，不改变 $Line / In / Out
+                wl_eval_code = (
+                    f'Module[{{$result}}, '
+                    f'$result = Quiet[ToExpression["{expr_str.replace(chr(34), chr(92)+chr(34))}", InputForm]]; '
+                    f'If[FailureQ[$result] || $result === $Failed, '
+                    f'  Association["status" -> "error", "ename" -> "EvaluationError", '
+                    f'              "evalue" -> ToString[$result, OutputForm], "traceback" -> {{}}], '
+                    f'  Association["status" -> "ok", '
+                    f'              "data" -> Association["text/plain" -> ToString[$result, OutputForm]], '
+                    f'              "metadata" -> Association[]]]]'
+                )
+                ue_res = await self.main_loop.run_in_executor(
+                    None, lambda c=wl_eval_code: self.wl_session.evaluate(c)
+                )
+                if isinstance(ue_res, dict):
+                    results[key] = ue_res
+                else:
+                    results[key] = {
+                        'status': 'ok',
+                        'data': {'text/plain': str(ue_res)},
+                        'metadata': {}
+                    }
+            except Exception as e:
+                results[key] = {
+                    'status': 'error',
+                    'ename': type(e).__name__,
+                    'evalue': str(e),
+                    'traceback': []
+                }
+        return results
+
     async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
         if not code.strip():
             return {
@@ -490,8 +595,18 @@ class WolframLanguageKernel(Kernel):
         self._executing = True
         self._interrupted = False
         try:
-            func = WLFunction(WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"), code)
+            # Fix 4: 传递 Python 端的 execution_count，使 In[n]/Out[n] 与前端保持同步
+            func = WLFunction(
+                WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"),
+                code,
+                self.execution_count
+            )
             res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
+
+            # 中断后 WL 可能返回 $Aborted（非 dict），此处检查必须在 isinstance 之前
+            if getattr(self, "_interrupted", False):
+                # 交由下方 except 块统一处理（即使没有异常抛出）
+                raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
             
             if not isinstance(res, dict):
                 # Fallback in case evaluation returned something unexpected
@@ -528,58 +643,90 @@ class WolframLanguageKernel(Kernel):
                     'traceback': list(traceback)
                 }
 
-            # If success, publish execute_result if not silent
-            mime_bundle = res.get("mime_bundle")
+            # Fix 2: 处理 mime_bundles 列表
+            # 第 1 个 bundle → execute_result（带 execution_count 提示符编号）
+            # 后续 bundles → display_data（无编号，视为执行副作用）
+            mime_bundles = res.get("mime_bundles", [])
             exec_count = res.get("execution_count", self.execution_count)
             
-            if mime_bundle and "application/x-wolfram-manipulate" in mime_bundle.get("data", {}):
-                manipulate_data = mime_bundle["data"]["application/x-wolfram-manipulate"]
-                try:
-                    widget_box = self.create_manipulate_widget(manipulate_data)
-                    mime_bundle = {
-                        "data": {
-                            "application/vnd.jupyter.widget-view+json": {
-                                "version_major": 2,
-                                "version_minor": 0,
-                                "model_id": widget_box.model_id
-                            },
-                            "text/plain": repr(widget_box)
-                        },
-                        "metadata": {}
-                    }
-                except Exception as w_err:
-                    self.log.error(f"Error creating manipulate widget: {w_err}")
-            
-            if not silent and mime_bundle:
-                data = mime_bundle.get("data", {})
-                metadata = mime_bundle.get("metadata", {})
-                self.send_response(self.iopub_socket, 'execute_result', {
-                    'execution_count': exec_count,
-                    'data': data,
-                    'metadata': metadata
-                })
+            if not silent:
+                for i, bundle in enumerate(mime_bundles):
+                    data = bundle.get("data", {})
+                    metadata = bundle.get("metadata", {})
+                    
+                    # Manipulate 控件处理（保持原有逻辑，每个 bundle 独立检查）
+                    if "application/x-wolfram-manipulate" in data:
+                        try:
+                            widget_box = self.create_manipulate_widget(
+                                data["application/x-wolfram-manipulate"]
+                            )
+                            data = {
+                                "application/vnd.jupyter.widget-view+json": {
+                                    "version_major": 2,
+                                    "version_minor": 0,
+                                    "model_id": widget_box.model_id
+                                },
+                                "text/plain": repr(widget_box)
+                            }
+                            metadata = {}
+                        except Exception as w_err:
+                            self.log.error(f"Error creating manipulate widget: {w_err}")
+                    
+                    if i == 0:
+                        # 第一个结果：execute_result（符合 Jupyter 协议：带 [n] 提示符）
+                        self.send_response(self.iopub_socket, 'execute_result', {
+                            'execution_count': exec_count,
+                            'data': data,
+                            'metadata': metadata
+                        })
+                    else:
+                        # 后续结果：display_data（无编号，视为副作用输出）
+                        self.send_response(self.iopub_socket, 'display_data', {
+                            'data': data,
+                            'metadata': metadata,
+                            'transient': {}
+                        })
+
+            # Fix 3: 求值 user_expressions（前端可能用于变量监视等）
+            evaluated_user_expr = {}
+            if user_expressions and res.get("status") == "ok":
+                evaluated_user_expr = await self._evaluate_user_expressions(user_expressions)
 
             return {
                 'status': 'ok',
                 'execution_count': exec_count,
                 'payload': [],
-                'user_expressions': {},
+                'user_expressions': evaluated_user_expr,
             }
 
         except (KeyboardInterrupt, asyncio.CancelledError, Exception) as e:
             if getattr(self, "_interrupted", False):
                 self._interrupted = False
-                self.restart_wolfram_session()
-                self.send_response(self.iopub_socket, 'error', {
-                    'ename': 'KeyboardInterrupt',
-                    'evalue': 'Execution interrupted by user. The Wolfram Kernel process has been restarted.',
-                    'traceback': ['KeyboardInterrupt: Execution interrupted by user. All variables and definitions have been reset.']
-                })
+                needs_restart = getattr(self, "_interrupt_needs_restart", False)
+                self._interrupt_needs_restart = False
+
+                # 软中断成功时：会话仍然活着，无需重启
+                if not needs_restart and self._is_session_alive():
+                    session_restarted = False
+                    self.log.info("Interrupt handled via SIGINT — Wolfram session preserved.")
+                else:
+                    # 软中断失败 或 会话已死：重启
+                    session_restarted = True
+                    self.log.info("Restarting Wolfram session after failed soft interrupt.")
+                    self.restart_wolfram_session()
+
+                self._send_interrupt_reply(session_restarted)
+                note = (
+                    "Evaluation interrupted by user. The Wolfram session has been restarted. All variables and definitions have been reset."
+                    if session_restarted
+                    else "Evaluation interrupted by user. Session state preserved — previously defined variables are still available."
+                )
                 return {
                     'status': 'error',
                     'ename': 'KeyboardInterrupt',
-                    'evalue': 'Execution interrupted by user. The Wolfram Kernel process has been restarted.',
-                    'traceback': ['KeyboardInterrupt: Execution interrupted by user. All variables and definitions have been reset.']
+                    'evalue': note,
+                    'traceback': [f'KeyboardInterrupt: {note}'],
+                    'execution_count': self.execution_count,
                 }
             
             # Self-healing: if session is dead, restart it
@@ -596,6 +743,8 @@ class WolframLanguageKernel(Kernel):
             }
         finally:
             self._executing = False
+            self._interrupted = False
+            self._interrupt_needs_restart = False
 
     def do_complete(self, code, cursor_pos):
         prefix = code[:cursor_pos]

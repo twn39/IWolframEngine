@@ -642,16 +642,22 @@ If[
 	(* set simulatedEvaluate to not implicitly evaluate its arguments *)
 	SetAttributes[simulatedEvaluate, HoldAll];
 
-	evaluateAndFormat[codeStr_String] :=
+	(* Fix 4: 接受外部传入的 executionCount，使 Python 端计数与 WL 端 In[n]/Out[n] 保持同步 *)
+	evaluateAndFormat[codeStr_String, externalCount_Integer: 0] :=
 		Module[
 			{
 				totalResult,
 				isSyntaxError, isAbort, isThrow, isError,
 				ename, evalue, traceback,
-				mimeBundles, singleBundle,
+				mimeBundles,
 				capturedStdout, capturedStderr,
 				executionCount
 			},
+
+			(* Fix 4: 如果 Python 传入了执行计数，优先使用它同步 In[n]/Out[n] *)
+			If[externalCount > 0,
+				loopState["executionCount"] = externalCount
+			];
 
 			(* 1. Initialize buffers *)
 			loopState["capturedStdout"] = {};
@@ -701,13 +707,26 @@ If[
 				];
 				evalue = Which[
 					isSyntaxError,
-						Block[{trimmed = StringTrim[totalResult["GeneratedMessages"]]},
-							If[trimmed === "\"\"" || trimmed === "" || StringLength[trimmed] == 0,
-								If[ListQ[loopState["LastMessages"]] && Length[loopState["LastMessages"]] > 0,
-									StringTrim[Last[loopState["LastMessages"]]],
-									"Syntax error in expression."
-								],
-								trimmed
+						(* Fix 5: 使用 SyntaxLength 精确定位语法错误位置 *)
+						Block[{pos, contextStr, baseMsg},
+							pos = SyntaxLength[codeStr];
+							baseMsg = Block[{t = StringTrim[totalResult["GeneratedMessages"]]},
+								If[t === "\"\"" || t === "" || StringLength[t] == 0,
+									If[ListQ[loopState["LastMessages"]] && Length[loopState["LastMessages"]] > 0,
+										StringTrim[Last[loopState["LastMessages"]]],
+										"Syntax error in expression."
+									],
+									t
+								]
+							];
+							(* 若 SyntaxLength 给出有效的错误位置，附加位置提示 *)
+							If[IntegerQ[pos] && pos >= 1 && pos <= StringLength[codeStr],
+								contextStr = StringTake[
+									codeStr,
+									{Max[1, pos - 10], Min[StringLength[codeStr], pos + 10]}
+								];
+								StringJoin[baseMsg, " (near position ", ToString[pos], ": \"...", contextStr, "...\")"],
+								baseMsg
 							]
 						],
 					isAbort, "Evaluation aborted.",
@@ -741,6 +760,8 @@ If[
 			];
 
 			(* 6. Format successful output *)
+			(* Fix 2: 返回 mime_bundles 列表，每个非 Null 结果产生独立 bundle *)
+			(* Python 侧：第 1 个发 execute_result，后续发 display_data *)
 			If[Length[totalResult["EvaluationResultOutputLineIndices"]] == 0,
 				Return[
 					Association[
@@ -748,41 +769,23 @@ If[
 						"execution_count" -> executionCount,
 						"captured_stdout" -> capturedStdout,
 						"captured_stderr" -> capturedStderr,
-						"mime_bundle" -> Null
+						"mime_bundles" -> {}
 					]
 				];
 			];
 
-			mimeBundles = Map[toMimeBundle, totalResult["EvaluationResult"]];
-
-			singleBundle = If[Length[mimeBundles] == 1,
-				Association[
-					"data" -> mimeBundles[[1]]["data"],
-					"metadata" -> mimeBundles[[1]]["metadata"]
+			(* 为每个非 Null 求值结果生成独立的 mime bundle *)
+			(* 避免对同一 item 调用 toMimeBundle 两次，使用 Block 缓存结果 *)
+			mimeBundles = Map[
+				Function[item,
+					Block[{bundle = toMimeBundle[item]},
+						Association[
+							"data" -> bundle["data"],
+							"metadata" -> bundle["metadata"]
+						]
+					]
 				],
-				Block[
-					{htmlParts, plainParts, combinedData, combinedMeta},
-					htmlParts = Map[toHTML, totalResult["EvaluationResult"]];
-					plainParts = Map[Lookup[#["data"], "text/plain", ""] &, mimeBundles];
-
-					combinedData = Association[
-						"text/html" -> StringJoin[
-							"<style>\n\t\t.wlj-grid-container {\n\t\t\tdisplay: inline-grid;\n\t\t\tgrid-template-columns: auto;\n\t\t}\n\t</style>\n\t<div>",
-							"<div class=\"wlj-grid-container\">",
-							StringJoin[
-								Table[
-									StringJoin["<div class=\"wlj-grid-item\">", htmlParts[[i]], "</div>"],
-									{i, 1, Length[htmlParts]}
-								]
-							],
-							"</div></div>"
-						],
-						"text/plain" -> StringJoin[Riffle[plainParts, "\n"]]
-					];
-					combinedMeta = Association[];
-
-					Association["data" -> combinedData, "metadata" -> combinedMeta]
-				]
+				totalResult["EvaluationResult"]
 			];
 
 			Return[
@@ -791,7 +794,7 @@ If[
 					"execution_count" -> executionCount,
 					"captured_stdout" -> capturedStdout,
 					"captured_stderr" -> capturedStderr,
-					"mime_bundle" -> singleBundle
+					"mime_bundles" -> mimeBundles
 				]
 			];
 		];
