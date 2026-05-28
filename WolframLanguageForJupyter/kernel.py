@@ -49,6 +49,91 @@ class StdinServer(threading.Thread):
         except Exception:
             pass
 
+class OutputBridgeServer(threading.Thread):
+    def __init__(self, kernel):
+        super().__init__()
+        self.kernel = kernel
+        self.daemon = True
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.bind(('127.0.0.1', 0))
+        self.port = self.server_socket.getsockname()[1]
+        self.server_socket.listen(5)
+        self._running = True
+        self._connections = []
+        self.has_received_output = False
+
+    def run(self):
+        while self._running:
+            try:
+                conn, addr = self.server_socket.accept()
+                self._connections.append(conn)
+                t = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
+                t.start()
+            except Exception:
+                break
+
+    def _handle_client(self, conn):
+        try:
+            rfile = conn.makefile('r', encoding='utf-8')
+            for line in rfile:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                    msg_type = payload.get("type")
+                    content = payload.get("content")
+                    
+                    if msg_type in ("stdout", "stderr", "display_data"):
+                        self.has_received_output = True
+                        
+                    if msg_type == "stdout":
+                        self.kernel.main_loop.call_soon_threadsafe(
+                            self.kernel.send_response, self.kernel.iopub_socket, 'stream', {
+                                'name': 'stdout',
+                                'text': content
+                            }
+                        )
+                    elif msg_type == "stderr":
+                        self.kernel.main_loop.call_soon_threadsafe(
+                            self.kernel.send_response, self.kernel.iopub_socket, 'stream', {
+                                'name': 'stderr',
+                                'text': content
+                            }
+                        )
+                    elif msg_type == "display_data":
+                        self.kernel.main_loop.call_soon_threadsafe(
+                            self.kernel.send_response, self.kernel.iopub_socket, 'display_data', {
+                                'data': content,
+                                'metadata': {},
+                                'transient': {}
+                            }
+                        )
+                except Exception:
+                    pass
+            rfile.close()
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if conn in self._connections:
+                self._connections.remove(conn)
+
+    def close(self):
+        self._running = False
+        try:
+            self.server_socket.close()
+        except Exception:
+            pass
+        for conn in list(self._connections):
+            try:
+                conn.close()
+            except Exception:
+                pass
+
 def clean_wolfram_boxes(text):
     text = re.sub(r'[\uf7c0-\uf7c9]', '', text)
     text = re.sub(r'[\uf3c0-\uf3c9]', '', text)
@@ -262,6 +347,8 @@ class WolframLanguageKernel(Kernel):
         self.main_loop = asyncio.get_event_loop()
         self.stdin_server = StdinServer(self)
         self.stdin_server.start()
+        self.output_bridge = OutputBridgeServer(self)
+        self.output_bridge.start()
         
         self._executing = False
         self._interrupted = False
@@ -613,6 +700,7 @@ class WolframLanguageKernel(Kernel):
         
         # Configure stdin TCP port in WL Private context
         self.wl_session.evaluate(f"WolframLanguageForJupyter`Private`$stdinPort = {self.stdin_server.port};")
+        self.wl_session.evaluate(f"WolframLanguageForJupyter`Private`$outputPort = {self.output_bridge.port};")
         
         try:
             ver = self.wl_session.evaluate('$Version')
@@ -1097,6 +1185,8 @@ class WolframLanguageKernel(Kernel):
         self._executing = True
         self._interrupted = False
         try:
+            if hasattr(self, "output_bridge") and self.output_bridge:
+                self.output_bridge.has_received_output = False
             segments = self._parse_execution_segments(code)
             exec_count = self.execution_count
             execute_result_sent = False
@@ -1316,11 +1406,11 @@ class WolframLanguageKernel(Kernel):
                         })
                         
                     stdout_str = res.get("captured_stdout", "")
-                    if stdout_str:
+                    if stdout_str and not getattr(self.output_bridge, "has_received_output", False):
                         self.send_response(self.iopub_socket, 'stream', {'name': 'stdout', 'text': stdout_str})
 
                     stderr_list = res.get("captured_stderr", [])
-                    if stderr_list:
+                    if stderr_list and not getattr(self.output_bridge, "has_received_output", False):
                         stderr_str = "\n".join(str(msg) for msg in stderr_list) + "\n"
                         self.send_response(self.iopub_socket, 'stream', {'name': 'stderr', 'text': stderr_str})
 
@@ -1525,11 +1615,11 @@ class WolframLanguageKernel(Kernel):
                         }
                         
                     stdout_str = res.get("captured_stdout", "")
-                    if stdout_str:
+                    if stdout_str and not getattr(self.output_bridge, "has_received_output", False):
                         self.send_response(self.iopub_socket, 'stream', {'name': 'stdout', 'text': stdout_str})
 
                     stderr_list = res.get("captured_stderr", [])
-                    if stderr_list:
+                    if stderr_list and not getattr(self.output_bridge, "has_received_output", False):
                         stderr_str = "\n".join(str(msg) for msg in stderr_list) + "\n"
                         self.send_response(self.iopub_socket, 'stream', {'name': 'stderr', 'text': stderr_str})
 
@@ -1934,6 +2024,8 @@ class WolframLanguageKernel(Kernel):
     def do_shutdown(self, restart):
         if hasattr(self, "stdin_server") and self.stdin_server:
             self.stdin_server.close()
+        if hasattr(self, "output_bridge") and self.output_bridge:
+            self.output_bridge.close()
         if self.wl_session:
             try:
                 self.wl_session.terminate()

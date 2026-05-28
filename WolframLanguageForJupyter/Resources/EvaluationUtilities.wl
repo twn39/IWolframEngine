@@ -665,7 +665,10 @@ If[
 			loopState["LastMessages"] = {};
 
 			(* 2. Set print and message formatters *)
-			loopState["printFunction"] = (AppendTo[loopState["capturedStdout"], #1] &);
+			loopState["printFunction"] = Function[str,
+				AppendTo[loopState["capturedStdout"], str];
+				sendToOutputBridge["stdout", str];
+			];
 
 			messageFormatter[messageName_, messageText_] :=
 				Module[
@@ -673,6 +676,7 @@ If[
 					msgString = ToString[System`ColonForm[HoldForm[messageName], messageText]];
 					AppendTo[loopState["LastMessages"], msgString];
 					AppendTo[loopState["capturedStderr"], msgString];
+					sendToOutputBridge["stderr", msgString <> "\n"];
 					msgString
 				];
 			SetAttributes[messageFormatter, HoldAll];

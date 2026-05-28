@@ -39,6 +39,8 @@ If[
 	private symbols
 *************************************)
 
+	JupyterDisplay;
+
 	(* begin the private context for WolframLanguageForJupyter *)
 	Begin["`Private`"];
 
@@ -996,6 +998,50 @@ table.wolfram-table tbody tr:hover { background-color: var(--jp-layout-color3, #
 
 			Return[Association["data" -> mimeData, "metadata" -> mimeMeta]];
 		];
+
+	(* persistent output socket state *)
+	$outputSocket = None;
+	$outputSocketConnected = False;
+
+	(* send a JSON payload line to the Output Bridge TCP socket *)
+	sendToOutputBridge[type_String, content_] := Module[
+		{payload, jsonStr, socket},
+		If[!IntegerQ[WolframLanguageForJupyter`Private`$outputPort] || WolframLanguageForJupyter`Private`$outputPort <= 0,
+			Return[]
+		];
+		
+		(* Connect if not already connected *)
+		If[!TrueQ[WolframLanguageForJupyter`Private`$outputSocketConnected],
+			socket = Quiet[SocketConnect[{"127.0.0.1", WolframLanguageForJupyter`Private`$outputPort}]];
+			If[Head[socket] === SocketObject,
+				WolframLanguageForJupyter`Private`$outputSocket = socket;
+				WolframLanguageForJupyter`Private`$outputSocketConnected = True;
+			,
+				WolframLanguageForJupyter`Private`$outputSocketConnected = False;
+			];
+		];
+		
+		If[TrueQ[WolframLanguageForJupyter`Private`$outputSocketConnected],
+			payload = Association["type" -> type, "content" -> content];
+			jsonStr = ExportString[payload, "JSON", "Compact" -> True];
+			(* Write with a newline delimiter to support readline on Python side *)
+			If[Quiet[WriteString[WolframLanguageForJupyter`Private`$outputSocket, jsonStr <> "\n"]] === $Failed,
+				(* connection broken: close and mark disconnected *)
+				Quiet[Close[WolframLanguageForJupyter`Private`$outputSocket]];
+				WolframLanguageForJupyter`Private`$outputSocketConnected = False;
+			];
+		];
+	];
+
+	(* public API: display rich media mid-execution *)
+	JupyterDisplay[expr_] := Module[
+		{bundle},
+		bundle = toMimeBundle[expr];
+		If[AssociationQ[bundle] && KeyExistsQ[bundle, "data"],
+			sendToOutputBridge["display_data", bundle["data"]];
+		];
+		Null
+	];
 
 	(* helper for TCP-based stdin requests *)
 	getStdinFromSocket[prompt_String, type_String] := Module[
