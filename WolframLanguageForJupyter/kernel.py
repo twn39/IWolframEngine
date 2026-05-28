@@ -699,9 +699,19 @@ class WolframLanguageKernel(Kernel):
                 first_non_empty_idx = idx
                 break
                 
-        if first_non_empty_idx != -1 and lines[first_non_empty_idx].strip().startswith("%%sh"):
-            cell_code = "".join(lines[first_non_empty_idx+1:])
-            return [{'type': 'sh', 'content': cell_code}]
+        if first_non_empty_idx != -1:
+            first_line_stripped = lines[first_non_empty_idx].strip()
+            if first_line_stripped.startswith("%%sh"):
+                cell_code = "".join(lines[first_non_empty_idx+1:])
+                return [{'type': 'sh', 'content': cell_code}]
+            elif first_line_stripped.startswith("%%timeit"):
+                prefix_idx = lines[first_non_empty_idx].find("%%timeit")
+                args = lines[first_non_empty_idx][prefix_idx + 8:].strip()
+                cell_code = "".join(lines[first_non_empty_idx+1:])
+                return [{'type': 'timeit', 'magic_type': 'cell', 'args': args, 'content': cell_code}]
+            elif first_line_stripped.startswith("%%time"):
+                cell_code = "".join(lines[first_non_empty_idx+1:])
+                return [{'type': 'time', 'magic_type': 'cell', 'content': cell_code}]
             
         segments = []
         current_wolfram = []
@@ -741,6 +751,20 @@ class WolframLanguageKernel(Kernel):
                 prefix_idx = line.find("%session")
                 action = line[prefix_idx + 8:].strip().lower() or "info"
                 segments.append({'type': 'session', 'action': action})
+            elif stripped.startswith("%timeit") and (len(stripped) == 7 or stripped[7].isspace()):
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                prefix_idx = line.find("%timeit")
+                args_and_code = line[prefix_idx + 7:].strip()
+                segments.append({'type': 'timeit', 'magic_type': 'line', 'args_and_code': args_and_code})
+            elif stripped.startswith("%time") and (len(stripped) == 5 or stripped[5].isspace()):
+                if current_wolfram:
+                    segments.append({'type': 'wolfram', 'content': "".join(current_wolfram)})
+                    current_wolfram = []
+                prefix_idx = line.find("%time")
+                cmd = line[prefix_idx + 5:].strip()
+                segments.append({'type': 'time', 'magic_type': 'line', 'content': cmd})
             else:
                 current_wolfram.append(line)
                 
@@ -1011,6 +1035,52 @@ class WolframLanguageKernel(Kernel):
 
         return {'text/plain': text, 'text/html': html}
 
+    def _parse_timeit_args(self, args_str: str) -> tuple[int | None, int, str]:
+        """Parse -n <loops> and -r <runs> from timeit command string, returning (loops, runs, code)."""
+        import shlex
+        try:
+            parts = shlex.split(args_str)
+        except Exception:
+            parts = args_str.split()
+            
+        loops = None
+        runs = 7
+        code_parts = []
+        
+        i = 0
+        while i < len(parts):
+            if parts[i] == '-n' and i + 1 < len(parts):
+                try:
+                    loops = int(parts[i+1])
+                    i += 2
+                    continue
+                except ValueError:
+                    pass
+            elif parts[i] == '-r' and i + 1 < len(parts):
+                try:
+                    runs = int(parts[i+1])
+                    i += 2
+                    continue
+                except ValueError:
+                    pass
+            # Everything after the first non-option is the code
+            code_parts = parts[i:]
+            break
+            
+        # Extract code preserving original whitespace/newlines from args_str if possible
+        code = ""
+        if code_parts:
+            first_part = code_parts[0]
+            idx = args_str.find(first_part)
+            if idx != -1:
+                code = args_str[idx:]
+            else:
+                code = " ".join(code_parts)
+        else:
+            code = args_str.strip()
+            
+        return loops, runs, code
+
     async def do_execute(self, code, silent, store_history=True, user_expressions=None, allow_stdin=False):
         if not code.strip():
             return {
@@ -1193,6 +1263,242 @@ class WolframLanguageKernel(Kernel):
                                 'name': 'stderr',
                                 'text': f"Unknown action: {action}. Supported actions: info, restart\n"
                             })
+                elif segment['type'] == 'time':
+                    import time
+                    seg_count = self.execution_count if wolfram_segment_idx == 0 else 0
+                    wolfram_segment_idx += 1
+                    
+                    py_wall_start = time.perf_counter()
+                    
+                    func = WLFunction(
+                        WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"),
+                        segment['content'],
+                        seg_count
+                    )
+                    res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
+                    
+                    py_wall_end = time.perf_counter()
+                    
+                    if getattr(self, "_interrupted", False):
+                        raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
+                        
+                    if not isinstance(res, dict):
+                        return {
+                            'status': 'error',
+                            'ename': 'TypeError',
+                            'evalue': f'Unexpected return type from evaluator: {type(res)}',
+                            'traceback': [str(res)],
+                            'execution_count': exec_count
+                        }
+                        
+                    wl_cpu = res.get("WolframCPUTime", 0.0)
+                    wl_wall = res.get("WolframWallTime", py_wall_end - py_wall_start)
+                    
+                    def format_duration(seconds):
+                        if seconds < 1e-6:
+                            return f"{seconds * 1e9:.2f} ns"
+                        elif seconds < 1e-3:
+                            return f"{seconds * 1e6:.2f} \u03bcs"
+                        elif seconds < 1.0:
+                            return f"{seconds * 1e3:.2f} ms"
+                        else:
+                            return f"{seconds:.2f} s"
+                            
+                    time_report = (
+                        f"CPU times: user {format_duration(wl_cpu)}\n"
+                        f"Wall time: {format_duration(wl_wall)}\n"
+                    )
+                    
+                    if not silent:
+                        self.send_response(self.iopub_socket, 'stream', {
+                            'name': 'stdout',
+                            'text': time_report
+                        })
+                        
+                    stdout_str = res.get("captured_stdout", "")
+                    if stdout_str:
+                        self.send_response(self.iopub_socket, 'stream', {'name': 'stdout', 'text': stdout_str})
+
+                    stderr_list = res.get("captured_stderr", [])
+                    if stderr_list:
+                        stderr_str = "\n".join(str(msg) for msg in stderr_list) + "\n"
+                        self.send_response(self.iopub_socket, 'stream', {'name': 'stderr', 'text': stderr_str})
+
+                    if res.get("status") == "error":
+                        ename = res.get("ename", "Error")
+                        evalue = res.get("evalue", "")
+                        traceback = res.get("traceback", [])
+                        
+                        self.send_response(self.iopub_socket, 'error', {
+                            'ename': ename,
+                            'evalue': evalue,
+                            'traceback': list(traceback)
+                        })
+                        return {
+                            'status': 'error',
+                            'ename': ename,
+                            'evalue': evalue,
+                            'traceback': list(traceback),
+                            'execution_count': exec_count
+                        }
+
+                    last_res = res
+                    mime_bundles = res.get("mime_bundles", [])
+                    exec_count = res.get("execution_count", self.execution_count)
+                    
+                    if not silent:
+                        for bundle in mime_bundles:
+                            data = bundle.get("data", {})
+                            metadata = bundle.get("metadata", {})
+                            
+                            if "image/svg+xml" in data:
+                                import uuid
+                                unique_id = str(uuid.uuid4().hex)[:8]
+                                data = dict(data)
+                                data["image/svg+xml"] = data["image/svg+xml"].replace("glyph", f"glyph_{unique_id}").replace("clip", f"clip_{unique_id}")
+                            
+                            if "application/x-wolfram-manipulate" in data:
+                                try:
+                                    self.create_manipulate_widget(data["application/x-wolfram-manipulate"])
+                                except Exception as w_err:
+                                    self.log.error(f"Error creating manipulate widget: {w_err}")
+                            else:
+                                if not execute_result_sent:
+                                    self.send_response(self.iopub_socket, 'execute_result', {
+                                        'execution_count': exec_count,
+                                        'data': data,
+                                        'metadata': metadata
+                                    })
+                                    execute_result_sent = True
+                                else:
+                                    self.send_response(self.iopub_socket, 'display_data', {
+                                        'data': data,
+                                        'metadata': metadata,
+                                        'transient': {}
+                                    })
+                elif segment['type'] == 'timeit':
+                    import time
+                    if segment.get('magic_type') == 'cell':
+                        args_str = segment.get('args', '')
+                        code_to_time = segment.get('content', '')
+                        loops, runs, _ = self._parse_timeit_args(args_str)
+                    else:
+                        args_and_code = segment.get('args_and_code', '')
+                        loops, runs, code_to_time = self._parse_timeit_args(args_and_code)
+                        
+                    if not code_to_time.strip():
+                        if not silent:
+                            self.send_response(self.iopub_socket, 'stream', {
+                                'name': 'stderr',
+                                'text': "Error: No code statement provided to timeit.\n"
+                            })
+                        continue
+                        
+                    seg_count = self.execution_count if wolfram_segment_idx == 0 else 0
+                    wolfram_segment_idx += 1
+                    
+                    func = WLFunction(
+                        WLSymbol("WolframLanguageForJupyter`evaluateAndFormat"),
+                        code_to_time,
+                        seg_count
+                    )
+                    res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(func))
+                    
+                    if getattr(self, "_interrupted", False):
+                        raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
+                        
+                    if not isinstance(res, dict):
+                        return {
+                            'status': 'error',
+                            'ename': 'TypeError',
+                            'evalue': f'Unexpected return type from evaluator: {type(res)}',
+                            'traceback': [str(res)],
+                            'execution_count': exec_count
+                        }
+                        
+                    if res.get("status") == "error":
+                        ename = res.get("ename", "Error")
+                        evalue = res.get("evalue", "")
+                        traceback = res.get("traceback", [])
+                        
+                        self.send_response(self.iopub_socket, 'error', {
+                            'ename': ename,
+                            'evalue': evalue,
+                            'traceback': list(traceback)
+                        })
+                        return {
+                            'status': 'error',
+                            'ename': ename,
+                            'evalue': evalue,
+                            'traceback': list(traceback),
+                            'execution_count': exec_count
+                        }
+                        
+                    calib_time = res.get("WolframWallTime", 0.0)
+                    
+                    if loops is None:
+                        if calib_time < 1e-6:
+                            loops = 1000000
+                        elif calib_time < 1e-5:
+                            loops = 100000
+                        elif calib_time < 1e-4:
+                            loops = 10000
+                        elif calib_time < 1e-3:
+                            loops = 1000
+                        elif calib_time < 1e-2:
+                            loops = 100
+                        elif calib_time < 1e-1:
+                            loops = 10
+                        else:
+                            loops = 1
+                            
+                    code_escaped = code_to_time.replace('\\', '\\\\').replace('"', '\\"')
+                    timing_query = f'Block[{{held = ToExpression["{code_escaped}", InputForm, Hold]}}, Quiet[Block[{{$Output = {{}}}}, Timing[AbsoluteTiming[Do[ReleaseHold[held], {{{loops}}}]]]]]]'
+                    
+                    raw_wall_times = []
+                    raw_cpu_times = []
+                    
+                    for r in range(runs):
+                        if getattr(self, "_interrupted", False):
+                            raise KeyboardInterrupt("Evaluation aborted by user interrupt.")
+                            
+                        timing_res = await self.main_loop.run_in_executor(None, lambda: self.wl_session.evaluate(timing_query))
+                        
+                        if isinstance(timing_res, (list, tuple)) and len(timing_res) >= 2:
+                            cpu_t = timing_res[0]
+                            wall_t = timing_res[1][0] if isinstance(timing_res[1], (list, tuple)) else 0.0
+                            raw_cpu_times.append(cpu_t)
+                            raw_wall_times.append(wall_t)
+                        else:
+                            raw_cpu_times.append(0.0)
+                            raw_wall_times.append(calib_time * loops)
+                            
+                    wall_times_per_loop = [t / loops for t in raw_wall_times]
+                    
+                    import math
+                    mean = sum(wall_times_per_loop) / len(wall_times_per_loop)
+                    variance = sum((x - mean) ** 2 for x in wall_times_per_loop) / len(wall_times_per_loop)
+                    stddev = math.sqrt(variance)
+                    
+                    def format_duration(seconds):
+                        if seconds < 1e-9:
+                            return f"{seconds * 1e12:.2f} ps"
+                        elif seconds < 1e-6:
+                            return f"{seconds * 1e9:.2f} ns"
+                        elif seconds < 1e-3:
+                            return f"{seconds * 1e6:.2f} \u03bcs"
+                        elif seconds < 1.0:
+                            return f"{seconds * 1e3:.2f} ms"
+                        else:
+                            return f"{seconds:.2f} s"
+                            
+                    report = f"{format_duration(mean)} \u00b1 {format_duration(stddev)} per loop (mean \u00b1 stddev of {runs} runs, {loops} loops each)\n"
+                    
+                    if not silent:
+                        self.send_response(self.iopub_socket, 'stream', {
+                            'name': 'stdout',
+                            'text': report
+                        })
                 elif segment['type'] == 'wolfram':
                     seg_count = self.execution_count if wolfram_segment_idx == 0 else 0
                     wolfram_segment_idx += 1

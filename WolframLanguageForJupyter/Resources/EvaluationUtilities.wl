@@ -678,8 +678,18 @@ If[
 			SetAttributes[messageFormatter, HoldAll];
 			Internal`$MessageFormatter = messageFormatter;
 
-			(* 3. Run evaluation *)
-			totalResult = simulatedEvaluate[codeStr];
+			(* 3. Run evaluation with CPU and Wall time measurement *)
+			Block[{timingRes, absoluteTimingRes, cpuTime, wallTime},
+				absoluteTimingRes = AbsoluteTiming[
+					timingRes = Timing[simulatedEvaluate[codeStr]]
+				];
+				wallTime = absoluteTimingRes[[1]];
+				cpuTime = timingRes[[1]];
+				totalResult = timingRes[[2]];
+				
+				totalResult["WolframCPUTime"] = cpuTime;
+				totalResult["WolframWallTime"] = wallTime;
+			];
 
 			(* 4. Cleanup formatters *)
 			loopState["printFunction"] = False;
