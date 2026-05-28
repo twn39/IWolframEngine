@@ -659,6 +659,32 @@ If[
 				loopState["executionCount"] = externalCount
 			];
 
+			executionCount = loopState["executionCount"];
+
+			(* Try pre-checking syntax with CodeParser/CodeInspector *)
+			Block[{hasSyntaxErrors = False, errorsReport},
+				If[Quiet[Needs["CodeParser`"]] =!= $Failed,
+					If[!TrueQ[CodeParser`CodeSyntaxQ[codeStr]],
+						hasSyntaxErrors = True;
+						errorsReport = generateSyntaxErrorReport[codeStr];
+					]
+				];
+				If[hasSyntaxErrors,
+					loopState["executionCount"] += 1;
+					Return[
+						Association[
+							"status" -> "error",
+							"execution_count" -> executionCount,
+							"ename" -> "SyntaxError",
+							"evalue" -> errorsReport["description"],
+							"traceback" -> errorsReport["traceback"],
+							"captured_stdout" -> "",
+							"captured_stderr" -> {}
+						]
+					];
+				];
+			];
+
 			(* 1. Initialize buffers *)
 			loopState["capturedStdout"] = {};
 			loopState["capturedStderr"] = {};
@@ -812,6 +838,79 @@ If[
 				]
 			];
 		];
+
+	generateSyntaxErrorReport[codeStr_String] := Module[
+		{lines, inspections, reports, traceback, desc = "Syntax error in expression."},
+		lines = StringSplit[codeStr, {"\n", "\r\n", "\r"}];
+		
+		(* Try to get list of errors from CodeInspector *)
+		inspections = {};
+		If[Quiet[Needs["CodeInspector`"]] =!= $Failed,
+			inspections = Quiet[CodeInspector`CodeInspect[codeStr]];
+			(* Filter for Fatal or Error severity strings *)
+			inspections = Select[inspections, MatchQ[#[[3]], "Fatal" | "Error"] &];
+		];
+		
+		(* If no inspections found from CodeInspector but we have syntax issues, fall back to parsing CST *)
+		If[Length[inspections] == 0,
+			Block[{ast, errorNodes},
+				ast = Quiet[CodeParser`CodeConcreteParse[codeStr]];
+				errorNodes = Cases[ast, (CodeParser`ErrorNode | CodeParser`SyntaxErrorNode | CodeParser`GroupMissingCloserNode | CodeParser`GroupMissingOpenerNode | CodeParser`CallMissingCloserNode | CodeParser`UnterminatedGroupNeedsReparseNode | CodeParser`UnterminatedTokenErrorNeedsReparseNode)[tag_, _, metadata_] :> {tag, metadata}, Infinity];
+				inspections = Map[
+					Function[err,
+						(* Create a pseudo inspection object *)
+						Block[{tag = err[[1]], meta = err[[2]], friendlyDesc},
+							friendlyDesc = Which[
+								tag === Token`Error`ExpectedOperand, "Expected an operand.",
+								tag === Token`Error`InfixImplicitNull, "Extra comma or missing argument.",
+								MatchQ[tag, GroupParen | GroupSquare | List | GroupDoubleBracket | Association], "Missing closer.",
+								True, "Syntax error: " <> ToString[tag]
+							];
+							CodeInspector`InspectionObject[tag, friendlyDesc, "Fatal", meta]
+						]
+					],
+					errorNodes
+				];
+			];
+		];
+		
+		(* Generate traceback for the first few errors (up to 3) *)
+		reports = {};
+		traceback = {};
+		Do[
+			Block[{ins = inspections[[i]], tag, msg, severity, meta, lineNum, colNum, lineContent, underline},
+				tag = ins[[1]];
+				msg = ins[[2]];
+				severity = ins[[3]];
+				meta = ins[[4]];
+				
+				If[KeyExistsQ[meta, CodeParser`Source],
+					lineNum = meta[CodeParser`Source][[1, 1]];
+					colNum = meta[CodeParser`Source][[1, 2]];
+					
+					If[lineNum >= 1 && lineNum <= Length[lines],
+						lineContent = lines[[lineNum]];
+						(* Build underline pointer *)
+						underline = StringJoin[Table[" ", {colNum - 1}]] <> "\033[1;31m^\033[0m";
+						
+						If[i == 1, desc = "Syntax error: " <> msg];
+						
+						AppendTo[traceback, "\033[0;31mSyntaxError: " <> msg <> "\033[0m"];
+						AppendTo[traceback, "  File \"<ipython-input>\", line " <> ToString[lineNum] <> ", column " <> ToString[colNum]];
+						AppendTo[traceback, "    " <> lineContent];
+						AppendTo[traceback, "    " <> underline <> " " <> ToString[tag] <> " (" <> ToString[severity] <> ")"];
+					];
+				];
+			],
+			{i, 1, Min[3, Length[inspections]]}
+		];
+		
+		If[Length[traceback] == 0,
+			traceback = {"\033[0;31mSyntaxError: " <> desc <> "\033[0m"};
+		];
+		
+		Association["description" -> desc, "traceback" -> traceback]
+	];
 
 	(* end the private context for WolframLanguageForJupyter *)
 	End[]; (* `Private` *)
